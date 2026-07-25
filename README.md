@@ -7,7 +7,7 @@ Two packages:
 - **`@corbits/tag-core`** — transport-agnostic contracts: `TagEvent`, `TagThread`, `TagDispatch`. Write dispatch logic once.
 - **`@corbits/tag-slack`** — `mountSlackTag(app, opts)` for Slack, built on the [Chat SDK](https://chat-sdk.dev) Slack adapter. Telegram/Teams adapters follow the same contract later.
 
-This is a **bridge, not a tool**: no agent calls it — it pushes thread events *into* your system and relays replies out. What a tag means (answer, start a workflow, stay silent) is entirely the host's dispatch.
+This is a **bridge, not a tool**: no agent calls it — it pushes thread events _into_ your system and relays replies out. What a tag means (answer, start a workflow, stay silent) is entirely the host's dispatch.
 
 ## Install
 
@@ -30,19 +30,25 @@ bun add github:corbitsdev/corbits-tag
 2. Point its event URL at your deployment: `https://<host>/api/tag/slack/webhook`.
 3. Provide `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` (env or the `slack`
    option).
-4. Provide a state backend (Redis or Postgres Chat SDK state adapter) for
-   thread subscriptions.
+4. Provide a state backend for thread subscriptions — `@chat-adapter/state-pg`
+   (peer dep `pg`) or `@chat-adapter/state-redis` (peer dep `redis`):
+
+   ```bash
+   bun add @chat-adapter/state-pg pg
+   ```
 
 ## Mount it
 
 ```ts
 import { mountSlackTag } from "@corbits/tag-slack";
-import { createPostgresState } from "@chat-adapter/state-postgres";
+import { createPostgresState } from "@chat-adapter/state-pg";
 
 // `app` is your Hono app (e.g. an Interchange createApp).
 mountSlackTag(app, {
   userName: "scout",
-  state: createPostgresState({ connectionString: process.env.DATABASE_URL! }),
+  // `url` (not `connectionString`); defaults to POSTGRES_URL or DATABASE_URL.
+  // Pass `{ client: pgPool }` instead to reuse an existing pool.
+  state: createPostgresState({ url: process.env.DATABASE_URL! }),
   // credentials may also come from SLACK_BOT_TOKEN / SLACK_SIGNING_SECRET
   slack: { botToken, signingSecret },
   onTag: async (event, thread) => {
