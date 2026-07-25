@@ -1,12 +1,18 @@
 import { describe, expect, test } from "bun:test";
 
 import type { TagEvent } from "@corbits/tag-core";
-import { wireBot, type BotMessage, type BotThread, type TagBot } from "./wire.ts";
+import {
+  wireBot,
+  type BotMessage,
+  type BotThread,
+  type TagBot,
+} from "./wire.ts";
 
 type MentionHandler = (thread: BotThread, message: BotMessage) => Promise<void>;
 
 function fakeBot() {
-  const handlers: { mention?: MentionHandler; subscribed?: MentionHandler } = {};
+  const handlers: { mention?: MentionHandler; subscribed?: MentionHandler } =
+    {};
   const bot: TagBot = {
     onNewMention: (h) => {
       handlers.mention = h;
@@ -54,7 +60,10 @@ describe("wireBot mentions", () => {
       },
     });
 
-    await handlers.mention!(thread, { text: "@scout look at Modal", author: human });
+    await handlers.mention!(thread, {
+      text: "@scout look at Modal",
+      author: human,
+    });
 
     expect(seen).toEqual([
       {
@@ -66,6 +75,7 @@ describe("wireBot mentions", () => {
           userName: "ada",
           fullName: "Ada Lovelace",
           isBot: false,
+          isRestricted: false,
         },
         isMention: true,
       },
@@ -103,6 +113,81 @@ describe("wireBot mentions", () => {
   });
 });
 
+describe("wireBot userLookup", () => {
+  test("enriches the author with email/isRestricted from userLookup", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => {
+        seen.push(event);
+      },
+      userLookup: async (userId) => {
+        expect(userId).toBe("U123");
+        return { email: "ada@example.com", isRestricted: false, isBot: false };
+      },
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(seen[0]!.author.email).toBe("ada@example.com");
+    expect(seen[0]!.author.isRestricted).toBe(false);
+  });
+
+  test("surfaces isRestricted so hosts can fail closed on guests", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => {
+        seen.push(event);
+      },
+      userLookup: async () => ({
+        email: "guest@other-workspace.example",
+        isRestricted: true,
+        isBot: false,
+      }),
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(seen[0]!.author.isRestricted).toBe(true);
+  });
+
+  test("without userLookup, email is undefined and isRestricted is false", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => {
+        seen.push(event);
+      },
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(seen[0]!.author.email).toBeUndefined();
+    expect(seen[0]!.author.isRestricted).toBe(false);
+  });
+
+  test("a lookup miss (null) leaves email undefined and isRestricted false", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => {
+        seen.push(event);
+      },
+      userLookup: async () => null,
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(seen[0]!.author.email).toBeUndefined();
+    expect(seen[0]!.author.isRestricted).toBe(false);
+  });
+});
+
 describe("wireBot ambient thread messages", () => {
   test("subscribed message routes to onThreadMessage with isMention: false", async () => {
     const { bot, handlers } = fakeBot();
@@ -117,7 +202,10 @@ describe("wireBot ambient thread messages", () => {
       },
     });
 
-    await handlers.subscribed!(thread, { text: "we should check traction", author: human });
+    await handlers.subscribed!(thread, {
+      text: "we should check traction",
+      author: human,
+    });
 
     expect(seen).toHaveLength(1);
     expect(seen[0]!.isMention).toBe(false);
@@ -153,6 +241,9 @@ describe("wireBot ambient thread messages", () => {
     const { thread } = fakeThread();
     wireBot(bot, { onTag: async () => {} });
 
-    await handlers.subscribed!(thread, { text: "nothing to see", author: human });
+    await handlers.subscribed!(thread, {
+      text: "nothing to see",
+      author: human,
+    });
   });
 });

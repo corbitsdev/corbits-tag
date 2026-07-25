@@ -16,10 +16,13 @@ import { Chat, type Adapter, type StateAdapter } from "chat";
 import { createSlackAdapter } from "@chat-adapter/slack";
 
 import { wireBot, type TagBot } from "./wire.ts";
+import { createSlackUserLookup } from "./slack-users.ts";
 import type { TagDispatch } from "@corbits/tag-core";
 
 export { wireBot } from "./wire.ts";
 export type { BotMessage, BotThread, TagBot } from "./wire.ts";
+export { createSlackUserLookup } from "./slack-users.ts";
+export type { SlackUserLookup, SlackUserProfile } from "./slack-users.ts";
 export type {
   TagAuthor,
   TagDispatch,
@@ -78,7 +81,15 @@ export function mountSlackTag(
     },
     state: options.state,
   });
-  wireBot(bot, options);
+  // Populates TagAuthor.email/isRestricted via a cached `users.info` call.
+  // Requires the `users:read.email` scope — see README "Mapping authors to
+  // identities". Silently yields undefined/false without it, so hosts that
+  // don't map authors to identities pay no extra cost.
+  const botToken = options.slack?.botToken ?? process.env.SLACK_BOT_TOKEN;
+  wireBot(bot, {
+    ...options,
+    ...(botToken ? { userLookup: createSlackUserLookup(botToken) } : {}),
+  });
 
   const path = options.path ?? DEFAULT_PATH;
   app.post(path, (c) => bot.webhooks.slack(c.req.raw));

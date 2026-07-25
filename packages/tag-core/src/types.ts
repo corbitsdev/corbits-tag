@@ -18,6 +18,22 @@ export type TagAuthor = {
   fullName: string;
   /** Whether the platform reports the author as a bot ("unknown" if it can't say). */
   isBot: boolean | "unknown";
+  /**
+   * The author's verified profile email, populated by the platform adapter
+   * when the token has the scope to read it. `undefined` when the adapter
+   * lacks that scope or the platform has no such concept — hosts that map
+   * authors to identities by email should fail closed on `undefined` rather
+   * than fall back to some other field.
+   */
+  email?: string;
+  /**
+   * True for guest, shared-channel, or other external accounts whose email
+   * was never verified by the host's own workspace (Slack: `is_restricted`,
+   * `is_ultra_restricted`, `is_stranger`). Hosts mapping authors to
+   * identities by email must reject these rather than trust the email —
+   * trusting it is a privilege-escalation path.
+   */
+  isRestricted: boolean;
 };
 
 /** A normalized mention or thread message, independent of platform. */

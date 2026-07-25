@@ -9,6 +9,7 @@ import type {
   TagEvent,
   TagThread,
 } from "@corbits/tag-core";
+import type { SlackUserLookup } from "./slack-users.ts";
 
 /** The slice of a Chat SDK thread this package relies on (structural). */
 export type BotThread = {
@@ -17,10 +18,14 @@ export type BotThread = {
   subscribe(): Promise<void>;
 };
 
-/** The slice of a Chat SDK message this package relies on (structural). */
+/**
+ * The slice of a Chat SDK message this package relies on (structural). The
+ * Chat SDK's author does not carry email/isRestricted — those are populated
+ * separately via `userLookup` (see `createSlackUserLookup`).
+ */
 export type BotMessage = {
   text: string;
-  author: TagAuthor & { isMe: boolean };
+  author: Omit<TagAuthor, "email" | "isRestricted"> & { isMe: boolean };
   isMention?: boolean;
 };
 
@@ -37,15 +42,36 @@ export type TagBot = {
 
 export type WireOptions = TagDispatch & {
   subscribeOnMention?: boolean;
+  /**
+   * Resolves a Slack user id to email/restriction info (see
+   * `createSlackUserLookup`). Omit to leave `email` undefined and
+   * `isRestricted` false on every event — hosts that don't map authors to
+   * identities don't need it.
+   */
+  userLookup?: SlackUserLookup;
 };
 
-function toEvent(message: BotMessage, thread: BotThread, isMention: boolean): TagEvent {
+async function toEvent(
+  message: BotMessage,
+  thread: BotThread,
+  isMention: boolean,
+  userLookup?: SlackUserLookup,
+): Promise<TagEvent> {
   const { userId, userName, fullName, isBot } = message.author;
+  const profile = userLookup ? await userLookup(userId) : null;
+  const author: TagAuthor = {
+    userId,
+    userName,
+    fullName,
+    isBot,
+    isRestricted: profile?.isRestricted ?? false,
+    ...(profile?.email !== undefined ? { email: profile.email } : {}),
+  };
   return {
     platform: "slack",
     threadId: thread.id,
     text: message.text,
-    author: { userId, userName, fullName, isBot },
+    author,
     isMention,
   };
 }
@@ -67,7 +93,8 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
     if (options.subscribeOnMention !== false) {
       await thread.subscribe();
     }
-    await options.onTag(toEvent(message, thread, true), toTagThread(thread));
+    const event = await toEvent(message, thread, true, options.userLookup);
+    await options.onTag(event, toTagThread(thread));
   });
 
   bot.onSubscribedMessage(async (thread, message) => {
@@ -75,14 +102,13 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
     // Mentions inside subscribed threads still land on onTag: an explicit
     // @mention always gets the mention treatment, ambient traffic doesn't.
     if (message.isMention === true) {
-      await options.onTag(toEvent(message, thread, true), toTagThread(thread));
+      const event = await toEvent(message, thread, true, options.userLookup);
+      await options.onTag(event, toTagThread(thread));
       return;
     }
     if (options.onThreadMessage) {
-      await options.onThreadMessage(
-        toEvent(message, thread, false),
-        toTagThread(thread),
-      );
+      const event = await toEvent(message, thread, false, options.userLookup);
+      await options.onThreadMessage(event, toTagThread(thread));
     }
   });
 }

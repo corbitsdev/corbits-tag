@@ -67,34 +67,36 @@ That mounts `POST /api/tag/slack/webhook` (configurable via `path`).
 
 ## Mapping authors to identities
 
-`TagAuthor` gives you `userId`, `userName`, `fullName`, and `isBot` — **no
-email**. If your dispatch needs to act as the person who tagged the bot, you have
-to resolve that yourself, and there are two things worth knowing first.
+`TagAuthor` gives you `userId`, `userName`, `fullName`, `isBot`, and — for
+Slack — `email` and `isRestricted`. `@corbits/tag-slack` populates the latter
+two itself via a cached `users.info` call, so you don't have to write that
+call yourself. There are still two things worth knowing before you trust them.
 
-**You need the `users:read.email` scope.** The email lives on the Slack profile,
-not the event, so the mapping starts with a `users.info` call. A host that grants
-only the three scopes listed above gets `missing_scope` at runtime — after the
-app is already installed. Cache the result; a user's email rarely changes.
+**`email` is `undefined` without the `users:read.email` scope.** A host that
+grants only the three scopes listed above gets `missing_scope` from Slack at
+runtime — after the app is already installed — and `tag-slack` logs that scope
+by name so it's easy to spot. Treat `undefined` as "can't map this author,"
+never as "any identity is fine."
 
-**Guest and shared-channel accounts must not be trusted by email.** Slack marks
-accounts from other workspaces in a Connect/shared channel with `is_restricted`,
-`is_ultra_restricted`, or `is_stranger`. Their email was never verified by _your_
-workspace, so matching it against your user table is a privilege-escalation path:
-anyone who can set a profile email in their own workspace and get into a shared
-channel can impersonate one of your users. Reject them.
+**Guest and shared-channel accounts must not be trusted by email.**
+`isRestricted` is `true` for accounts Slack marks `is_restricted`,
+`is_ultra_restricted`, or `is_stranger` — from other workspaces in a
+Connect/shared channel. Their email was never verified by _your_ workspace, so
+matching it against your user table is a privilege-escalation path: anyone who
+can set a profile email in their own workspace and get into a shared channel
+can impersonate one of your users. Reject them.
 
 ```ts
-const info = await slack.users.info({ user: event.author.userId });
-const u = info.user;
+onTag: async (event) => {
+  const { email, isRestricted, isBot } = event.author;
 
-if (u.is_bot) return deny();
-if (u.is_restricted || u.is_ultra_restricted || u.is_stranger) return deny();
+  if (isBot) return deny();
+  if (isRestricted) return deny();
+  if (!email) return deny(); // scope missing, or no email set on the profile
 
-const email = u.profile?.email?.trim().toLowerCase();
-if (!email) return deny(); // scope missing, or no email set
-
-const identity = await yourIdentityStore.findByEmail(email);
-if (!identity) return deny(); // no fallback identity — see below
+  const identity = await yourIdentityStore.findByEmail(email);
+  if (!identity) return deny(); // no fallback identity — see below
+};
 ```
 
 **Fail closed, with no fallback.** Every miss should deny: no email, no matching
