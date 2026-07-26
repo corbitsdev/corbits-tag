@@ -9,7 +9,10 @@ import type {
   TagEvent,
   TagThread,
 } from "@corbits/tag-core";
-import type { SlackUserLookup } from "./slack-users.ts";
+import type {
+  SlackUserLookup,
+  SlackUserProfile,
+} from "./slack-users.ts";
 
 /** The slice of a Chat SDK thread this package relies on (structural). */
 export type BotThread = {
@@ -20,12 +23,12 @@ export type BotThread = {
 
 /**
  * The slice of a Chat SDK message this package relies on (structural). The
- * Chat SDK's author does not carry email/isRestricted — those are populated
- * separately via `userLookup` (see `createSlackUserLookup`).
+ * Chat SDK's author carries no identity fields — email, emailVerified and
+ * isRestricted are populated separately via `userLookup`.
  */
 export type BotMessage = {
   text: string;
-  author: Omit<TagAuthor, "email" | "isRestricted"> & { isMe: boolean };
+  author: Omit<TagAuthor, "email" | "emailVerified" | "isRestricted"> & { isMe: boolean };
   isMention?: boolean;
 };
 
@@ -45,11 +48,40 @@ export type WireOptions = TagDispatch & {
   /**
    * Resolves a Slack user id to email/restriction info (see
    * `createSlackUserLookup`). Omit to leave `email` undefined and
-   * `isRestricted` false on every event — hosts that don't map authors to
-   * identities don't need it.
+   * `emailVerified`/`isRestricted` `"unknown"` on every event — hosts that
+   * don't map authors to identities don't need it.
+   *
+   * May reject; a rejection is logged and treated as unresolved rather than
+   * dropping the message.
    */
   userLookup?: SlackUserLookup;
 };
+
+/**
+ * Runs the host's lookup, returning `undefined` when identity could not be
+ * established for any reason.
+ *
+ * `userLookup` is host-supplied and public API, so it may throw. An unguarded
+ * rejection here propagates out of the event handler and drops the mention
+ * entirely — silently, and after the thread has already been subscribed.
+ */
+async function lookupProfile(
+  userId: string,
+  userLookup: SlackUserLookup | undefined,
+): Promise<SlackUserProfile | undefined> {
+  if (!userLookup) return undefined;
+  try {
+    const result = await userLookup(userId);
+    return result.ok ? result.profile : undefined;
+  } catch (err) {
+    console.warn(
+      `tag-slack: userLookup threw for ${userId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return undefined;
+  }
+}
 
 async function toEvent(
   message: BotMessage,
@@ -58,13 +90,17 @@ async function toEvent(
   userLookup?: SlackUserLookup,
 ): Promise<TagEvent> {
   const { userId, userName, fullName, isBot } = message.author;
-  const profile = userLookup ? await userLookup(userId) : null;
+  const profile = await lookupProfile(userId, userLookup);
   const author: TagAuthor = {
     userId,
     userName,
     fullName,
     isBot,
-    isRestricted: profile?.isRestricted ?? false,
+    // Unresolved stays "unknown" rather than defaulting. `false` here would
+    // mean a rate limit reads as "not a guest, email not confirmed" — facts
+    // Slack never told us.
+    emailVerified: profile === undefined ? "unknown" : profile.emailVerified,
+    isRestricted: profile === undefined ? "unknown" : profile.isRestricted,
     ...(profile?.email !== undefined ? { email: profile.email } : {}),
   };
   return {

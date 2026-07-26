@@ -75,7 +75,10 @@ describe("wireBot mentions", () => {
           userName: "ada",
           fullName: "Ada Lovelace",
           isBot: false,
-          isRestricted: false,
+          // No userLookup wired: identity was never established, so neither
+          // field may claim a value.
+          emailVerified: "unknown",
+          isRestricted: "unknown",
         },
         isMention: true,
       },
@@ -124,13 +127,22 @@ describe("wireBot userLookup", () => {
       },
       userLookup: async (userId) => {
         expect(userId).toBe("U123");
-        return { email: "ada@example.com", isRestricted: false, isBot: false };
+        return {
+          ok: true,
+          profile: {
+            email: "ada@example.com",
+            emailVerified: true,
+            isRestricted: false,
+            isBot: false,
+          },
+        };
       },
     });
 
     await handlers.mention!(thread, { text: "hi", author: human });
 
     expect(seen[0]!.author.email).toBe("ada@example.com");
+    expect(seen[0]!.author.emailVerified).toBe(true);
     expect(seen[0]!.author.isRestricted).toBe(false);
   });
 
@@ -143,8 +155,13 @@ describe("wireBot userLookup", () => {
         seen.push(event);
       },
       userLookup: async () => ({
-        email: "guest@other-workspace.example",
-        isRestricted: true,
+        ok: true,
+        profile: {
+          email: "guest@other-workspace.example",
+          emailVerified: true,
+          isRestricted: true,
+          isBot: false,
+        },
         isBot: false,
       }),
     });
@@ -154,7 +171,7 @@ describe("wireBot userLookup", () => {
     expect(seen[0]!.author.isRestricted).toBe(true);
   });
 
-  test("without userLookup, email is undefined and isRestricted is false", async () => {
+  test("without userLookup, identity is unknown rather than assumed", async () => {
     const { bot, handlers } = fakeBot();
     const { thread } = fakeThread();
     const seen: TagEvent[] = [];
@@ -167,10 +184,11 @@ describe("wireBot userLookup", () => {
     await handlers.mention!(thread, { text: "hi", author: human });
 
     expect(seen[0]!.author.email).toBeUndefined();
-    expect(seen[0]!.author.isRestricted).toBe(false);
+    expect(seen[0]!.author.emailVerified).toBe("unknown");
+    expect(seen[0]!.author.isRestricted).toBe("unknown");
   });
 
-  test("a lookup miss (null) leaves email undefined and isRestricted false", async () => {
+  test("a failed lookup leaves identity unknown, never permissive", async () => {
     const { bot, handlers } = fakeBot();
     const { thread } = fakeThread();
     const seen: TagEvent[] = [];
@@ -178,13 +196,16 @@ describe("wireBot userLookup", () => {
       onTag: async (event) => {
         seen.push(event);
       },
-      userLookup: async () => null,
+      userLookup: async () => ({ ok: false, reason: "unavailable" }),
     });
 
     await handlers.mention!(thread, { text: "hi", author: human });
 
+    // A rate limit must not read as "not a guest". This is the fail-open the
+    // discriminated result exists to prevent.
     expect(seen[0]!.author.email).toBeUndefined();
-    expect(seen[0]!.author.isRestricted).toBe(false);
+    expect(seen[0]!.author.emailVerified).toBe("unknown");
+    expect(seen[0]!.author.isRestricted).toBe("unknown");
   });
 });
 
@@ -245,5 +266,29 @@ describe("wireBot ambient thread messages", () => {
       text: "nothing to see",
       author: human,
     });
+  });
+});
+
+describe("userLookup failures never drop a message", () => {
+  test("a throwing lookup still dispatches, with identity unknown", async () => {
+    // wire.ts subscribes to the thread before building the event, so an
+    // unguarded rejection leaves the bot subscribed to a thread it never
+    // answered in.
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => {
+        seen.push(event);
+      },
+      userLookup: async () => {
+        throw new Error("slack exploded");
+      },
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.author.isRestricted).toBe("unknown");
+    expect(seen[0]!.author.emailVerified).toBe("unknown");
   });
 });
