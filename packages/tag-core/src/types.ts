@@ -71,6 +71,16 @@ export type TagEvent = {
   /** True when the bot was explicitly @-mentioned; false for ambient subscribed messages. */
   isMention: boolean;
   /**
+   * How this event was triggered: `"mention"` for an explicit @-mention,
+   * `"ambient"` for an untagged message in a thread the bot already
+   * subscribed to. Redundant with `isMention` today, but named so a host
+   * reading `TagEvent` sees the addressed/untagged distinction as its own
+   * concept rather than inferring it from a boolean meant for the mention
+   * check specifically — future trigger kinds (if any) extend this field,
+   * not `isMention`.
+   */
+  trigger: "mention" | "ambient";
+  /**
    * Prior messages in this thread, oldest-first, not including the current
    * message. Populated only when the platform package was asked to fetch
    * thread history (see e.g. `@corbits/tag-slack`'s `threadHistory` option);

@@ -204,6 +204,7 @@ async function toEvent(
     text: message.text,
     author,
     isMention,
+    trigger: isMention ? "mention" : "ambient",
     ...(priorTurns !== undefined ? { priorTurns } : {}),
   };
 }
@@ -254,7 +255,11 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
       await options.onTag(event, toTagThread(thread));
       return;
     }
-    if (options.onThreadMessage) {
+    // Ambient delivery is for other humans talking in a thread the bot
+    // already joined, not for other bots/integrations posting into it — a
+    // bot replying to another bot is exactly the loop this mechanism must
+    // never create.
+    if (options.onThreadMessage && message.author.isBot !== true) {
       const event = await toEvent(
         message,
         thread,
