@@ -95,6 +95,7 @@ describe("wireBot mentions", () => {
           isRestricted: "unknown",
         },
         isMention: true,
+        trigger: "mention",
       },
     ]);
     expect(isSubscribed()).toBe(true);
@@ -244,6 +245,26 @@ describe("wireBot ambient thread messages", () => {
 
     expect(seen).toHaveLength(1);
     expect(seen[0]!.isMention).toBe(false);
+    expect(seen[0]!.trigger).toBe("ambient");
+  });
+
+  test("an ambient message from another bot never reaches onThreadMessage", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    let calls = 0;
+    wireBot(bot, {
+      onTag: async () => {},
+      onThreadMessage: async () => {
+        calls += 1;
+      },
+    });
+
+    await handlers.subscribed!(thread, {
+      text: "deploy finished",
+      author: { ...human, userId: "BOT2", isBot: true },
+    });
+
+    expect(calls).toBe(0);
   });
 
   test("an explicit mention inside a subscribed thread still gets mention treatment", async () => {
@@ -268,6 +289,7 @@ describe("wireBot ambient thread messages", () => {
 
     expect(tags).toHaveLength(1);
     expect(tags[0]!.isMention).toBe(true);
+    expect(tags[0]!.trigger).toBe("mention");
     expect(ambient).toHaveLength(0);
   });
 
