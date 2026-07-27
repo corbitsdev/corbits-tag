@@ -22,6 +22,12 @@ export type BotHistoryMessage = {
   author: { userId: string; isMe: boolean };
 };
 
+/** A message wrapped with edit/react capabilities (Chat SDK's `SentMessage`). */
+export type BotSentMessage = {
+  edit(content: string): Promise<unknown>;
+  addReaction(emoji: string): Promise<unknown>;
+};
+
 /** The slice of a Chat SDK thread this package relies on (structural). */
 export type BotThread = {
   id: string;
@@ -36,6 +42,14 @@ export type BotThread = {
   refresh?(): Promise<void>;
   /** Populated by `refresh()`, oldest-first. */
   recentMessages?: BotHistoryMessage[];
+  /**
+   * Wrap a plain message as a `BotSentMessage` (Chat SDK:
+   * `Thread.createSentMessageFromMessage`), giving it `edit`/`addReaction`.
+   * Used for the `acknowledge` affordance below. Optional: fakes in tests,
+   * and any bot too old to have it, simply don't provide it — `acknowledge`
+   * silently no-ops without it.
+   */
+  createSentMessageFromMessage?(message: unknown): BotSentMessage;
 };
 
 /**
@@ -88,9 +102,58 @@ export type WireOptions = TagDispatch & {
    * log pipeline or to silence them in tests.
    */
   logger?: Logger;
+  /**
+   * React to a message the moment this package decides to dispatch it to the
+   * host (`onTag`/`onThreadMessage`), so silence while the host works
+   * doesn't read as "ignored". Off by default. Requires the bot token's
+   * `reactions:write` scope; without it Slack's `reactions.add` errors,
+   * which is logged once and otherwise swallowed — a missing scope never
+   * blocks answering.
+   */
+  acknowledge?: boolean;
+  /**
+   * Emoji name used by `acknowledge` (Slack `reactions.add` short name, no
+   * colons). Default: `"eyes"`. This is the one visible choice `acknowledge`
+   * makes on the host's behalf, so it's configurable rather than fixed.
+   */
+  acknowledgeEmoji?: string;
 };
 
 const DEFAULT_MAX_HISTORY_MESSAGES = 50;
+const DEFAULT_ACKNOWLEDGE_EMOJI = "eyes";
+
+/**
+ * Logged at most once per process — a missing Slack scope doesn't need to
+ * repeat on every message, just be visible that it's happening.
+ */
+let warnedMissingReactionsScope = false;
+
+/**
+ * Add the acknowledge reaction to `message`. Never throws: the most likely
+ * failure is a bot token missing `reactions:write`, which must never block
+ * answering.
+ */
+async function acknowledgeMessage(
+  thread: BotThread,
+  message: BotMessage,
+  emoji: string,
+  logger: Logger,
+): Promise<void> {
+  if (typeof thread.createSentMessageFromMessage !== "function") return;
+  try {
+    const sent = thread.createSentMessageFromMessage(message);
+    await sent.addReaction(emoji);
+  } catch (err) {
+    if (!warnedMissingReactionsScope) {
+      warnedMissingReactionsScope = true;
+      logger.warn(
+        "tag-slack: acknowledge reaction failed — the bot token likely lacks " +
+          `the reactions:write scope. Add it (and reinstall the app) to keep ` +
+          `this working. (${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
+  }
+}
 
 /**
  * Fetches prior messages for `thread` and maps them to `PriorTurn`s,
@@ -209,14 +272,46 @@ async function toEvent(
   };
 }
 
-function toTagThread(thread: BotThread): TagThread {
+function toTagThread(
+  thread: BotThread,
+  postOverride?: (text: string) => Promise<void>,
+): TagThread {
   return {
     id: thread.id,
-    post: async (text) => {
-      await thread.post(text);
-    },
+    post:
+      postOverride ??
+      (async (text) => {
+        await thread.post(text);
+      }),
     subscribe: () => thread.subscribe(),
   };
+}
+
+/**
+ * Apply the opt-in `acknowledge` affordance (see `WireOptions`) for a
+ * message about to be dispatched to the host, and build the `TagThread` the
+ * host's handler should reply through.
+ *
+ * `postOverride` isn't produced by anything yet — it exists so the
+ * thinking-indicator affordance (a later addition) can extend this same
+ * seam instead of `wireBot` growing a second, parallel dispatch-prep path.
+ */
+async function prepareDispatch(
+  thread: BotThread,
+  message: BotMessage,
+  options: WireOptions,
+  logger: Logger,
+): Promise<TagThread> {
+  if (options.acknowledge) {
+    await acknowledgeMessage(
+      thread,
+      message,
+      options.acknowledgeEmoji ?? DEFAULT_ACKNOWLEDGE_EMOJI,
+      logger,
+    );
+  }
+  const postOverride: ((text: string) => Promise<void>) | undefined = undefined;
+  return toTagThread(thread, postOverride);
 }
 
 /** Register mention + subscribed-message handlers on the bot. */
@@ -236,7 +331,8 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
       options.threadHistory,
       logger,
     );
-    await options.onTag(event, toTagThread(thread));
+    const tagThread = await prepareDispatch(thread, message, options, logger);
+    await options.onTag(event, tagThread);
   });
 
   bot.onSubscribedMessage(async (thread, message) => {
@@ -252,7 +348,8 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
         options.threadHistory,
         logger,
       );
-      await options.onTag(event, toTagThread(thread));
+      const tagThread = await prepareDispatch(thread, message, options, logger);
+      await options.onTag(event, tagThread);
       return;
     }
     // Ambient delivery is for other humans talking in a thread the bot
@@ -268,7 +365,8 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
         options.threadHistory,
         logger,
       );
-      await options.onThreadMessage(event, toTagThread(thread));
+      const tagThread = await prepareDispatch(thread, message, options, logger);
+      await options.onThreadMessage(event, tagThread);
     }
   });
 }
