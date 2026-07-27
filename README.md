@@ -31,6 +31,7 @@ bun add github:corbitsdev/corbits-tag
    `app_mentions:read`, `chat:write`, and `channels:history` scopes.
    Add `users:read` and `users:read.email` if your dispatch maps Slack authors
    to identities — see [Mapping authors to identities](#mapping-authors-to-identities).
+   Add `reactions:write` if you enable `acknowledge` — see note below.
 2. Point its event URL at your deployment: `https://<host>/api/tag/slack/webhook`.
 3. Provide `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` (env or the `slack`
    option).
@@ -60,6 +61,17 @@ mountSlackTag(app, {
 ```
 
 That mounts `POST /api/tag/slack/webhook` (configurable via `path`).
+
+## Acknowledging receipt
+
+Set `acknowledge: true` to have the package react to a message the moment it
+dispatches to your `onTag`/`onThreadMessage`, so a user can tell "seen, bot
+is working on it" apart from "never arrived." Off by default. Requires the
+bot token's **`reactions:write`** scope — **and the app must be reinstalled**
+after adding it, since scope changes don't take effect on an
+already-installed app. A missing scope logs once and never blocks
+answering. The emoji is configurable via `acknowledgeEmoji` (default
+`"eyes"`).
 
 ## Security posture — read this
 

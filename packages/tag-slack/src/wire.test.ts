@@ -5,6 +5,7 @@ import {
   wireBot,
   type BotHistoryMessage,
   type BotMessage,
+  type BotSentMessage,
   type BotThread,
   type TagBot,
 } from "./wire.ts";
@@ -52,6 +53,19 @@ function fakeThread(
       : {}),
   };
   return { thread, posts, isSubscribed: () => subscribed };
+}
+
+/** A thread that also supports the `acknowledge` affordance. */
+function fakeReactableThread(addReaction: (emoji: string) => Promise<unknown>) {
+  const { thread, posts, isSubscribed } = fakeThread();
+  const reactable: BotThread = {
+    ...thread,
+    createSentMessageFromMessage: (message: unknown): BotSentMessage => ({
+      edit: async () => {},
+      addReaction,
+    }),
+  };
+  return { thread: reactable, posts, isSubscribed };
 }
 
 const human = {
@@ -480,5 +494,93 @@ describe("wireBot threadHistory", () => {
     await handlers.mention!(thread, { text: "hi", author: human });
 
     expect(seen[0]!.priorTurns).toEqual([]);
+  });
+});
+
+describe("wireBot acknowledge", () => {
+  test("acknowledge: true reacts before onTag fires", async () => {
+    const order: string[] = [];
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeReactableThread(async (emoji) => {
+      order.push(`react:${emoji}`);
+    });
+    wireBot(bot, {
+      onTag: async () => {
+        order.push("onTag");
+      },
+      acknowledge: true,
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(order).toEqual(["react:eyes", "onTag"]);
+  });
+
+  test("acknowledgeEmoji overrides the default", async () => {
+    const reactions: string[] = [];
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeReactableThread(async (emoji) => {
+      reactions.push(emoji);
+    });
+    wireBot(bot, {
+      onTag: async () => {},
+      acknowledge: true,
+      acknowledgeEmoji: "white_check_mark",
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(reactions).toEqual(["white_check_mark"]);
+  });
+
+  test("without createSentMessageFromMessage, acknowledge silently no-ops", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread(); // no reaction support
+    let calls = 0;
+    wireBot(bot, {
+      onTag: async () => {
+        calls += 1;
+      },
+      acknowledge: true,
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(calls).toBe(1);
+  });
+
+  test("a rejecting addReaction is logged once and dispatch still proceeds", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeReactableThread(async () => {
+      throw new Error("missing_scope");
+    });
+    const warnings: string[] = [];
+    let calls = 0;
+    wireBot(bot, {
+      onTag: async () => {
+        calls += 1;
+      },
+      acknowledge: true,
+      logger: { warn: (m) => warnings.push(m) },
+    });
+
+    await handlers.mention!(thread, { text: "first", author: human });
+    await handlers.mention!(thread, { text: "second", author: human });
+
+    expect(calls).toBe(2);
+    expect(warnings).toHaveLength(1);
+  });
+
+  test("acknowledge unset does not react at all", async () => {
+    let reacted = false;
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeReactableThread(async () => {
+      reacted = true;
+    });
+    wireBot(bot, { onTag: async () => {} });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(reacted).toBe(false);
   });
 });

@@ -21,7 +21,13 @@ import { defaultLogger, type Logger } from "./logger.ts";
 import type { TagDispatch } from "@corbits/tag-core";
 
 export { wireBot } from "./wire.ts";
-export type { BotHistoryMessage, BotMessage, BotThread, TagBot } from "./wire.ts";
+export type {
+  BotHistoryMessage,
+  BotMessage,
+  BotSentMessage,
+  BotThread,
+  TagBot,
+} from "./wire.ts";
 export { createSlackUserLookup } from "./slack-users.ts";
 export type {
   SlackUserLookup,
@@ -74,6 +80,16 @@ export type MountSlackTagOptions = TagDispatch & {
    * `console.warn`.
    */
   logger?: Logger;
+  /**
+   * React to a message the moment it's dispatched to the host. Off by
+   * default; requires the bot token's `reactions:write` scope, and the
+   * Slack app must be reinstalled after adding it — scope changes don't
+   * apply to an already-installed app. A missing scope fails soft (logged
+   * once, never blocks answering — see `wireBot`).
+   */
+  acknowledge?: boolean;
+  /** Emoji used by `acknowledge` (Slack short name, no colons). Default: `"eyes"`. */
+  acknowledgeEmoji?: string;
 };
 
 export type MountedSlackTag = {
