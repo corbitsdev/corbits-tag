@@ -11,6 +11,7 @@ Slack ──POST /api/tag/slack/webhook──▶ host Hono app
                                           │ onNewMention / onSubscribedMessage
                                           ▼
                                        wireBot
+                         optional user lookup → TagAuthor identity facts
                                 normalize → TagEvent + TagThread
                                           │
                                           ▼
@@ -34,7 +35,10 @@ Slack ──POST /api/tag/slack/webhook──▶ host Hono app
    backend, no network.
 4. **Core types are platform-free.** Dispatch written against
    `@corbits/tag-core` ports to future adapters (Telegram, Teams)
-   unchanged.
+   unchanged. Identity fields on `TagAuthor` (`email`, `emailVerified`,
+   `isRestricted`) are optional facts the platform adapter may populate;
+   unresolved facts are `"unknown"` (or omitted for `email`), never a
+   permissive boolean default. Trust decisions remain the host's.
 5. **State backend is host-supplied.** Subscription/dedupe state needs a
    store (Redis or Postgres Chat SDK adapters); the host chooses and owns
    it — this package takes a `StateAdapter`, never a connection string.

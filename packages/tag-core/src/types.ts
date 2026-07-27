@@ -18,6 +18,29 @@ export type TagAuthor = {
   fullName: string;
   /** Whether the platform reports the author as a bot ("unknown" if it can't say). */
   isBot: boolean | "unknown";
+  /**
+   * The author's profile email, populated by the platform adapter when the
+   * token has the scope to read it. `undefined` when the adapter lacks that
+   * scope, the platform has no such concept, or the lookup failed — check
+   * `emailVerified` to tell "they have no email" from "we could not ask".
+   */
+  email?: string;
+  /**
+   * Whether the platform confirmed the author controls `email` (Slack's
+   * `is_email_confirmed`). `"unknown"` when the adapter could not find out.
+   *
+   * Hosts that create accounts keyed on this address must require `true`:
+   * an unconfirmed profile email lets someone claim an address they do not
+   * own, and anything later matching on that address inherits the claim.
+   */
+  emailVerified: boolean | "unknown";
+  /**
+   * Whether the platform reports the author as a guest or from another
+   * workspace (Slack Connect, multi/single-channel guest). `"unknown"` when
+   * the adapter could not find out — treat that as "not established", never
+   * as `false`.
+   */
+  isRestricted: boolean | "unknown";
 };
 
 /** A normalized mention or thread message, independent of platform. */
