@@ -16,6 +16,10 @@ Slack ──POST /api/tag/slack/webhook──▶ host Hono app
                                           │
                                           ▼
                               host dispatch (onTag / onThreadMessage)
+                                          │ optional
+                                          ▼
+                         @corbits/tag-interchange createPrincipalResolver
+                         email → real principal, or provisionPrincipal
 ```
 
 ## Decisions
@@ -42,6 +46,13 @@ Slack ──POST /api/tag/slack/webhook──▶ host Hono app
 5. **State backend is host-supplied.** Subscription/dedupe state needs a
    store (Redis or Postgres Chat SDK adapters); the host chooses and owns
    it — this package takes a `StateAdapter`, never a connection string.
+6. **Principal binding is a separate package.** `@corbits/tag-interchange`
+   maps a chat author to a real Interchange principal (never synthesized).
+   Platform packages stay free of `@intx/db`. `createPrincipalResolver`
+   reports what it found rather than deciding; `provisionPrincipal` is the
+   explicit write that mints a real per-person principal on first contact.
+   There is no shared or fallback identity — every resolution is a real
+   user's principal.
 
 ## Event routing rules
 

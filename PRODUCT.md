@@ -12,8 +12,10 @@ speaking adds value (default posture: silence).
 ## What it is not
 
 - Not an agent tool — no agent calls it; it *causes* agents/workflows to run.
-- Not an auth system — Slack signature verification only; identity mapping
-  belongs to the host.
+- Not a full auth system — platform signature verification lives in adapters;
+  principal binding for Interchange hosts lives in `@corbits/tag-interchange`
+  (email → real principal, or provision one). Identity mapping is still a
+  deliberate host choice; this package never invents principals.
 - Not a bot framework — the Chat SDK is the framework; this package is the
   mount + contract layer that makes tags an Interchange-shaped capability.
 
@@ -29,4 +31,6 @@ workflows initiated as catalog actions).
 - `@corbits/tag-core` — contracts (`TagEvent`, `TagThread`, `TagDispatch`).
 - `@corbits/tag-slack` — `mountSlackTag(app, opts)`; Chat SDK Slack adapter;
   one webhook route; mention + subscribed-message wiring.
+- `@corbits/tag-interchange` — Interchange host binding: chat author →
+  principal by email, or provision a real per-person one on first contact.
 - Future: `@corbits/tag-telegram`, `@corbits/tag-teams` on the same contract.
