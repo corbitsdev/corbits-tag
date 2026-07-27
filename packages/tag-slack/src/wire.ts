@@ -117,10 +117,35 @@ export type WireOptions = TagDispatch & {
    * makes on the host's behalf, so it's configurable rather than fixed.
    */
   acknowledgeEmoji?: string;
+  /**
+   * Post a placeholder message immediately on dispatch, then transparently
+   * edit it in place when the host's dispatch calls `thread.post()` with the
+   * real answer, instead of posting a second message. Off by default.
+   * Requires `thread.post()` to return something `edit`-capable (Chat SDK's
+   * `SentMessage`); without that this silently does nothing and the host's
+   * first `thread.post()` behaves as normal.
+   */
+  thinkingIndicator?: boolean;
+  /**
+   * Placeholder text posted by `thinkingIndicator`. Default: a neutral
+   * "working on it" message with no bot name baked in — this package has no
+   * opinion on what a host's bot is called.
+   */
+  thinkingIndicatorText?: string;
+  /**
+   * Text the placeholder is replaced with if the host's `onTag`/
+   * `onThreadMessage` throws. A thread left reading the placeholder forever
+   * would wrongly imply work is still in progress, so failures always
+   * resolve it one way or another.
+   */
+  thinkingIndicatorErrorText?: string;
 };
 
 const DEFAULT_MAX_HISTORY_MESSAGES = 50;
 const DEFAULT_ACKNOWLEDGE_EMOJI = "eyes";
+const DEFAULT_THINKING_INDICATOR_TEXT = "_Working on it…_";
+const DEFAULT_THINKING_INDICATOR_ERROR_TEXT =
+  "Something went wrong while generating a response.";
 
 /**
  * Logged at most once per process — a missing Slack scope doesn't need to
@@ -152,6 +177,42 @@ async function acknowledgeMessage(
           `this working. (${err instanceof Error ? err.message : String(err)})`,
       );
     }
+  }
+}
+
+/**
+ * Post a placeholder in `thread` and return a `post` function that edits it
+ * in place instead of posting a new message. `undefined` when the
+ * placeholder couldn't be posted/wrapped — callers fall back to a normal
+ * `thread.post()`. Never throws.
+ */
+async function startThinkingIndicator(
+  thread: BotThread,
+  text: string,
+  logger: Logger,
+): Promise<((text: string) => Promise<void>) | undefined> {
+  try {
+    // Chat SDK's `Thread.post()` already returns a `SentMessage` (edit/
+    // delete/addReaction) — no need to re-wrap it via
+    // `createSentMessageFromMessage`, which is for plain incoming messages.
+    const placeholder = await thread.post(text);
+    if (
+      typeof placeholder !== "object" ||
+      placeholder === null ||
+      typeof (placeholder as { edit?: unknown }).edit !== "function"
+    ) {
+      return undefined;
+    }
+    const sent = placeholder as BotSentMessage;
+    return async (replacement: string) => {
+      await sent.edit(replacement);
+    };
+  } catch (err) {
+    logger.warn(
+      `tag-slack: thinking-indicator placeholder failed, falling back to a ` +
+        `normal reply: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return undefined;
   }
 }
 
@@ -287,21 +348,31 @@ function toTagThread(
   };
 }
 
+/** What `prepareDispatch` hands back to `wireBot` for one dispatch. */
+type PreparedDispatch = {
+  /** The `TagThread` the host's handler should reply through. */
+  tagThread: TagThread;
+  /**
+   * Call if the host's handler throws, to resolve a thinking-indicator
+   * placeholder into an error rather than leaving it reading "thinking"
+   * forever. No-op when no placeholder was started.
+   */
+  notifyFailure(): Promise<void>;
+};
+
 /**
- * Apply the opt-in `acknowledge` affordance (see `WireOptions`) for a
- * message about to be dispatched to the host, and build the `TagThread` the
- * host's handler should reply through.
- *
- * `postOverride` isn't produced by anything yet — it exists so the
- * thinking-indicator affordance (a later addition) can extend this same
- * seam instead of `wireBot` growing a second, parallel dispatch-prep path.
+ * Apply the opt-in `acknowledge`/`thinkingIndicator` affordances (see
+ * `WireOptions`) for a message about to be dispatched to the host, and build
+ * the `TagThread` the host's handler should reply through — its `post()`
+ * edits the thinking placeholder in place when one was started, otherwise
+ * behaves like a normal reply.
  */
 async function prepareDispatch(
   thread: BotThread,
   message: BotMessage,
   options: WireOptions,
   logger: Logger,
-): Promise<TagThread> {
+): Promise<PreparedDispatch> {
   if (options.acknowledge) {
     await acknowledgeMessage(
       thread,
@@ -310,8 +381,39 @@ async function prepareDispatch(
       logger,
     );
   }
-  const postOverride: ((text: string) => Promise<void>) | undefined = undefined;
-  return toTagThread(thread, postOverride);
+
+  let postOverride: ((text: string) => Promise<void>) | undefined;
+  let notifyFailure: (() => Promise<void>) | undefined;
+  if (options.thinkingIndicator) {
+    const edit = await startThinkingIndicator(
+      thread,
+      options.thinkingIndicatorText ?? DEFAULT_THINKING_INDICATOR_TEXT,
+      logger,
+    );
+    if (edit) {
+      postOverride = edit;
+      notifyFailure = async () => {
+        try {
+          await edit(
+            options.thinkingIndicatorErrorText ??
+              DEFAULT_THINKING_INDICATOR_ERROR_TEXT,
+          );
+        } catch (err) {
+          logger.warn(
+            `tag-slack: failed to resolve thinking-indicator placeholder ` +
+              `after a dispatch failure: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+          );
+        }
+      };
+    }
+  }
+
+  return {
+    tagThread: toTagThread(thread, postOverride),
+    notifyFailure: notifyFailure ?? (async () => {}),
+  };
 }
 
 /** Register mention + subscribed-message handlers on the bot. */
@@ -331,8 +433,18 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
       options.threadHistory,
       logger,
     );
-    const tagThread = await prepareDispatch(thread, message, options, logger);
-    await options.onTag(event, tagThread);
+    const { tagThread, notifyFailure } = await prepareDispatch(
+      thread,
+      message,
+      options,
+      logger,
+    );
+    try {
+      await options.onTag(event, tagThread);
+    } catch (err) {
+      await notifyFailure();
+      throw err;
+    }
   });
 
   bot.onSubscribedMessage(async (thread, message) => {
@@ -348,8 +460,18 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
         options.threadHistory,
         logger,
       );
-      const tagThread = await prepareDispatch(thread, message, options, logger);
-      await options.onTag(event, tagThread);
+      const { tagThread, notifyFailure } = await prepareDispatch(
+        thread,
+        message,
+        options,
+        logger,
+      );
+      try {
+        await options.onTag(event, tagThread);
+      } catch (err) {
+        await notifyFailure();
+        throw err;
+      }
       return;
     }
     // Ambient delivery is for other humans talking in a thread the bot
@@ -365,8 +487,18 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
         options.threadHistory,
         logger,
       );
-      const tagThread = await prepareDispatch(thread, message, options, logger);
-      await options.onThreadMessage(event, tagThread);
+      const { tagThread, notifyFailure } = await prepareDispatch(
+        thread,
+        message,
+        options,
+        logger,
+      );
+      try {
+        await options.onThreadMessage(event, tagThread);
+      } catch (err) {
+        await notifyFailure();
+        throw err;
+      }
     }
   });
 }

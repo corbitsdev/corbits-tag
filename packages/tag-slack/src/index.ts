@@ -90,6 +90,18 @@ export type MountSlackTagOptions = TagDispatch & {
   acknowledge?: boolean;
   /** Emoji used by `acknowledge` (Slack short name, no colons). Default: `"eyes"`. */
   acknowledgeEmoji?: string;
+  /**
+   * Show a placeholder while the host works, then edit it in place with the
+   * real answer. Off by default. Host call sites need no changes — the
+   * `TagThread.post()` handed to `onTag`/`onThreadMessage` transparently
+   * edits the placeholder instead of posting twice. See `WireOptions` for
+   * the fallback/failure behavior.
+   */
+  thinkingIndicator?: boolean;
+  /** Placeholder text for `thinkingIndicator`. Default: a neutral, bot-name-free message. */
+  thinkingIndicatorText?: string;
+  /** Text the placeholder is replaced with if the host's handler throws. */
+  thinkingIndicatorErrorText?: string;
 };
 
 export type MountedSlackTag = {

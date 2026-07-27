@@ -73,6 +73,23 @@ already-installed app. A missing scope logs once and never blocks
 answering. The emoji is configurable via `acknowledgeEmoji` (default
 `"eyes"`).
 
+## Thinking indicator
+
+Set `thinkingIndicator: true` to post a placeholder immediately on dispatch
+and transparently edit it in place when your dispatch calls
+`thread.post()` with the real answer — your call site needs no changes.
+Off by default. Text is configurable via `thinkingIndicatorText` (default a
+neutral, bot-name-free message); if your dispatch throws, the placeholder is
+replaced with `thinkingIndicatorErrorText` rather than left reading
+"thinking" forever. If the placeholder can't be posted, or `thread.post()`
+doesn't return something edit-capable, this falls back to a normal post and
+answering proceeds unaffected.
+
+(Slack's native `assistant.threads.setStatus` was investigated and rejected
+for this: it requires the app to be a registered Slack Assistant — an
+`assistant` feature block plus `assistant:write` scope — which this
+mechanism doesn't assume any host has configured.)
+
 ## Security posture — read this
 
 - The route mounts **outside** your session auth: Slack is not a principal. The Chat SDK adapter verifies the **Slack request signature**; that is the only authentication `@corbits/tag-slack` performs.

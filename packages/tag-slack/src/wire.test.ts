@@ -68,6 +68,33 @@ function fakeReactableThread(addReaction: (emoji: string) => Promise<unknown>) {
   return { thread: reactable, posts, isSubscribed };
 }
 
+/**
+ * A thread whose `post()` returns an edit-capable `SentMessage`, so
+ * `thinkingIndicator` can wrap it — mirrors what Chat SDK's `Thread.post()`
+ * actually returns.
+ */
+function fakeEditableThread(firstPostThrows = false, editable = true) {
+  const events: string[] = [];
+  let postCalls = 0;
+  const thread: BotThread = {
+    id: "C1:1721800000.000100",
+    post: async (text: string) => {
+      postCalls += 1;
+      if (firstPostThrows && postCalls === 1) throw new Error("post failed");
+      events.push(`post:${text}`);
+      if (!editable) return {};
+      return {
+        edit: async (text: string) => {
+          events.push(`edit:${text}`);
+        },
+        addReaction: async () => {},
+      } satisfies BotSentMessage;
+    },
+    subscribe: async () => {},
+  };
+  return { thread, events };
+}
+
 const human = {
   userId: "U123",
   userName: "ada",
@@ -582,5 +609,155 @@ describe("wireBot acknowledge", () => {
     await handlers.mention!(thread, { text: "hi", author: human });
 
     expect(reacted).toBe(false);
+  });
+});
+
+describe("wireBot thinkingIndicator", () => {
+  test("posts a placeholder, then the host's post() edits it in place", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread();
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("the real answer");
+      },
+      thinkingIndicator: true,
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(events).toEqual([
+      "post:_Working on it…_",
+      "edit:the real answer",
+    ]);
+  });
+
+  test("thinkingIndicatorText overrides the default placeholder", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread();
+    wireBot(bot, {
+      onTag: async () => {},
+      thinkingIndicator: true,
+      thinkingIndicatorText: "_On it…_",
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(events).toEqual(["post:_On it…_"]);
+  });
+
+  test("a throwing onTag replaces the placeholder with an error, not silence", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread();
+    wireBot(bot, {
+      onTag: async () => {
+        throw new Error("boom");
+      },
+      thinkingIndicator: true,
+    });
+
+    await expect(
+      handlers.mention!(thread, { text: "hi", author: human }),
+    ).rejects.toThrow("boom");
+
+    expect(events).toEqual([
+      "post:_Working on it…_",
+      "edit:Something went wrong while generating a response.",
+    ]);
+  });
+
+  test("thinkingIndicatorErrorText overrides the default failure text", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread();
+    wireBot(bot, {
+      onTag: async () => {
+        throw new Error("boom");
+      },
+      thinkingIndicator: true,
+      thinkingIndicatorErrorText: "Sorry, that failed.",
+    });
+
+    await expect(
+      handlers.mention!(thread, { text: "hi", author: human }),
+    ).rejects.toThrow("boom");
+
+    expect(events).toEqual([
+      "post:_Working on it…_",
+      "edit:Sorry, that failed.",
+    ]);
+  });
+
+  test("a throwing placeholder post falls back to a normal post, dispatch unaffected", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread(true);
+    let calls = 0;
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        calls += 1;
+        await tagThread.post("normal reply");
+      },
+      thinkingIndicator: true,
+      logger: { warn: () => {} },
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(calls).toBe(1);
+    expect(events).toEqual(["post:normal reply"]);
+  });
+
+  test("a non-editable placeholder falls back to a normal post", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread(false, /* editable */ false);
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("normal reply");
+      },
+      thinkingIndicator: true,
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(events).toEqual(["post:_Working on it…_", "post:normal reply"]);
+  });
+
+  test("thinkingIndicator combined with acknowledge: both fire, in order", async () => {
+    const order: string[] = [];
+    const { bot, handlers } = fakeBot();
+    const { thread: base, events } = fakeEditableThread();
+    const thread: BotThread = {
+      ...base,
+      createSentMessageFromMessage: (): BotSentMessage => ({
+        edit: async () => {},
+        addReaction: async (emoji) => {
+          order.push(`react:${emoji}`);
+        },
+      }),
+    };
+    wireBot(bot, {
+      onTag: async () => {
+        order.push("onTag");
+      },
+      acknowledge: true,
+      thinkingIndicator: true,
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(order).toEqual(["react:eyes", "onTag"]);
+    expect(events).toEqual(["post:_Working on it…_"]);
+  });
+
+  test("thinkingIndicator unset behaves as a normal post", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread();
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("normal reply");
+      },
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(events).toEqual(["post:normal reply"]);
   });
 });
