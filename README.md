@@ -67,50 +67,63 @@ That mounts `POST /api/tag/slack/webhook` (configurable via `path`).
 
 ## Mapping authors to identities
 
-`TagAuthor` gives you `userId`, `userName`, `fullName`, `isBot`, and — for
-Slack — `email` and `isRestricted`. `@corbits/tag-slack` populates the latter
-two itself via a cached `users.info` call, so you don't have to write that
-call yourself. There are still two things worth knowing before you trust them.
+`TagAuthor` carries `userId`, `userName`, `fullName`, `isBot`, and optional
+identity facts: `email`, `emailVerified`, and `isRestricted`.
+`@corbits/tag-slack` fills the identity facts via a cached `users.info` call
+when a bot token is available. When a fact could not be established (missing
+scope, network error, no lookup wired), `email` is omitted and
+`emailVerified` / `isRestricted` are `"unknown"` — never a permissive
+boolean default. A host can fail closed on a fact it was never told; it
+cannot fail closed on `false`.
 
-**`email` is `undefined` without the `users:read.email` scope.** A host that
+**`email` is omitted without the `users:read.email` scope.** A host that
 grants only the three scopes listed above gets `missing_scope` from Slack at
-runtime — after the app is already installed — and `tag-slack` logs that scope
-by name so it's easy to spot. Treat `undefined` as "can't map this author,"
-never as "any identity is fine."
+runtime — after the app is already installed — and `tag-slack` logs that
+scope by name so it's easy to spot. Treat a missing email as "can't map this
+author," never as "any identity is fine."
 
 **Guest and shared-channel accounts must not be trusted by email.**
 `isRestricted` is `true` for accounts Slack marks `is_restricted`,
 `is_ultra_restricted`, or `is_stranger` — from other workspaces in a
-Connect/shared channel. Their email was never verified by _your_ workspace, so
-matching it against your user table is a privilege-escalation path: anyone who
-can set a profile email in their own workspace and get into a shared channel
-can impersonate one of your users. Reject them.
+Connect/shared channel. Their email was never verified by _your_ workspace,
+so matching it against your user table is a privilege-escalation path:
+anyone who can set a profile email in their own workspace and get into a
+shared channel can impersonate one of your users. Reject them. Treat
+`"unknown"` the same as restricted — the fact was not established.
+
+**Unconfirmed profile emails are not trustworthy.** `emailVerified` mirrors
+Slack's `is_email_confirmed`. Hosts that match or create accounts by email
+must require `emailVerified === true`: an unconfirmed address lets someone
+claim an address they do not own, and anything later matching on that
+address inherits the claim.
 
 ```ts
 onTag: async (event) => {
-  const { email, isRestricted, isBot } = event.author;
+  const { email, emailVerified, isRestricted, isBot } = event.author;
 
-  if (isBot) return deny();
-  if (isRestricted) return deny();
-  if (!email) return deny(); // scope missing, or no email set on the profile
+  if (isBot !== false) return deny();
+  if (isRestricted !== false) return deny(); // true | "unknown"
+  if (emailVerified !== true) return deny(); // false | "unknown"
+  if (!email) return deny();
 
   const identity = await yourIdentityStore.findByEmail(email);
   if (!identity) return deny(); // no fallback identity — see below
 };
 ```
 
-**Fail closed, with no fallback.** Every miss should deny: no email, no matching
-account, inactive account, guest, bot, or a failed `users.info` call. Falling back
-to a service identity is tempting and wrong — it silently gives an unmatched
-Slack poster whatever that identity can reach, which is the escalation the deny
-paths exist to prevent.
+**Fail closed, with no fallback.** Every miss should deny: no email,
+unconfirmed email, no matching account, inactive account, guest, bot, or a
+failed `users.info` call. Falling back to a service identity is tempting and
+wrong — it silently gives an unmatched Slack poster whatever that identity
+can reach, which is the escalation the deny paths exist to prevent.
 
-If you are mapping to an Interchange principal, **read the principal row out of
-the database rather than constructing one**. A row from the `principal` table
-still goes through normal grant evaluation, so you are supplying authentication
-from a different trust root, not bypassing authorization. Check the capability
-grant too if your dispatch skips the HTTP layer — the data layer's own ACLs are
-not a substitute for "may this principal do this at all".
+If you are mapping to an Interchange principal, **read the principal row out
+of the database rather than constructing one**. A row from the `principal`
+table still goes through normal grant evaluation, so you are supplying
+authentication from a different trust root, not bypassing authorization.
+Check the capability grant too if your dispatch skips the HTTP layer — the
+data layer's own ACLs are not a substitute for "may this principal do this
+at all".
 
 ## Development
 
