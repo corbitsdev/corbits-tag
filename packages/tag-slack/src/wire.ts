@@ -20,12 +20,20 @@ import type {
 export type BotHistoryMessage = {
   text: string;
   author: { userId: string; isMe: boolean };
+  /**
+   * Stable message id (Chat SDK's `Message.id`), when the fake/adapter
+   * supplies one. Used to reliably identify the just-arrived message in
+   * `recentMessages` — see `fetchPriorTurns`.
+   */
+  id?: string;
 };
 
-/** A message wrapped with edit/react capabilities (Chat SDK's `SentMessage`). */
+/** A message wrapped with edit/react/delete capabilities (Chat SDK's `SentMessage`). */
 export type BotSentMessage = {
   edit(content: string): Promise<unknown>;
   addReaction(emoji: string): Promise<unknown>;
+  /** Chat SDK's `SentMessage.delete()`. Used to retract an unused thinking placeholder. */
+  delete(): Promise<unknown>;
 };
 
 /** The slice of a Chat SDK thread this package relies on (structural). */
@@ -61,6 +69,8 @@ export type BotMessage = {
   text: string;
   author: Omit<TagAuthor, "email" | "emailVerified" | "isRestricted"> & { isMe: boolean };
   isMention?: boolean;
+  /** Stable message id (Chat SDK's `Message.id`), when available. See `BotHistoryMessage.id`. */
+  id?: string;
 };
 
 /** The slice of the Chat SDK bot this package relies on (structural). */
@@ -90,9 +100,11 @@ export type WireOptions = TagDispatch & {
    * Fetch this thread's prior messages and attach them to every `TagEvent`
    * as `priorTurns`. Off by default: it costs one extra Slack API call per
    * mention, and a host that doesn't want conversation memory shouldn't pay
-   * for it. `maxMessages` bounds the mechanism's own fetch (default 50) —
-   * it is not the host's turn budget; a host decides how many of the
-   * returned turns to actually use.
+   * for it. `refresh()` itself takes no range argument — it re-fetches
+   * whatever the Chat SDK's own history cache holds; `maxMessages` bounds
+   * how many of *those* messages this mechanism keeps (default 50), by
+   * slicing after the fact. It is not the host's turn budget; a host
+   * decides how many of the returned turns to actually use.
    */
   threadHistory?: { maxMessages?: number };
   /**
@@ -148,29 +160,35 @@ const DEFAULT_THINKING_INDICATOR_ERROR_TEXT =
   "Something went wrong while generating a response.";
 
 /**
- * Logged at most once per process — a missing Slack scope doesn't need to
- * repeat on every message, just be visible that it's happening.
+ * Mutable "have we warned yet" flag for the acknowledge affordance, scoped
+ * to a single `wireBot()` call (one bot/mount) rather than the module —
+ * a module-level flag would let one workspace's missing scope silence the
+ * warning for every other bot in the same process, and make tests
+ * order-dependent on a shared global.
  */
-let warnedMissingReactionsScope = false;
+type AckWarnState = { warned: boolean };
 
 /**
  * Add the acknowledge reaction to `message`. Never throws: the most likely
  * failure is a bot token missing `reactions:write`, which must never block
- * answering.
+ * answering. Logged at most once per `wireBot()` call — a missing scope
+ * doesn't need to repeat on every message, just be visible that it's
+ * happening.
  */
 async function acknowledgeMessage(
   thread: BotThread,
   message: BotMessage,
   emoji: string,
   logger: Logger,
+  warnState: AckWarnState,
 ): Promise<void> {
   if (typeof thread.createSentMessageFromMessage !== "function") return;
   try {
     const sent = thread.createSentMessageFromMessage(message);
     await sent.addReaction(emoji);
   } catch (err) {
-    if (!warnedMissingReactionsScope) {
-      warnedMissingReactionsScope = true;
+    if (!warnState.warned) {
+      warnState.warned = true;
       logger.warn(
         "tag-slack: acknowledge reaction failed — the bot token likely lacks " +
           `the reactions:write scope. Add it (and reinstall the app) to keep ` +
@@ -181,16 +199,17 @@ async function acknowledgeMessage(
 }
 
 /**
- * Post a placeholder in `thread` and return a `post` function that edits it
- * in place instead of posting a new message. `undefined` when the
- * placeholder couldn't be posted/wrapped — callers fall back to a normal
- * `thread.post()`. Never throws.
+ * Post a placeholder in `thread` and return it wrapped as a `BotSentMessage`
+ * (edit in place, or delete if the host's dispatch never posts — see
+ * `prepareDispatch`). `undefined` when the placeholder couldn't be
+ * posted/wrapped — callers fall back to a normal `thread.post()`. Never
+ * throws.
  */
 async function startThinkingIndicator(
   thread: BotThread,
   text: string,
   logger: Logger,
-): Promise<((text: string) => Promise<void>) | undefined> {
+): Promise<BotSentMessage | undefined> {
   try {
     // Chat SDK's `Thread.post()` already returns a `SentMessage` (edit/
     // delete/addReaction) — no need to re-wrap it via
@@ -203,10 +222,7 @@ async function startThinkingIndicator(
     ) {
       return undefined;
     }
-    const sent = placeholder as BotSentMessage;
-    return async (replacement: string) => {
-      await sent.edit(replacement);
-    };
+    return placeholder as BotSentMessage;
   } catch (err) {
     logger.warn(
       `tag-slack: thinking-indicator placeholder failed, falling back to a ` +
@@ -247,10 +263,20 @@ async function fetchPriorTurns(
   // webhook fires, so it is normally the last entry here — drop it so a host
   // rendering `priorTurns` into a prompt never sees the current question
   // twice.
+  const last = messages.length > 0 ? messages[messages.length - 1]! : undefined;
   const isCurrent =
-    messages.length > 0 &&
-    messages[messages.length - 1]!.text === current.text &&
-    messages[messages.length - 1]!.author.userId === current.author.userId;
+    last !== undefined &&
+    (current.id !== undefined && last.id !== undefined
+      ? // Preferred path: a stable Chat SDK message id, immune to two
+        // identical-looking messages from the same author.
+        last.id === current.id
+      : // Fallback when no id is available on either side: text + author
+        // equality. This is a known, accepted limitation — it misidentifies
+        // the current message as "prior" (or vice versa) if the same author
+        // posts the exact same text twice in a row in the same thread. Not
+        // corrected further because the Chat SDK always supplies `id` in
+        // practice; this path exists for fakes/older adapters that don't.
+        last.text === current.text && last.author.userId === current.author.userId);
   const prior = isCurrent ? messages.slice(0, -1) : messages;
 
   return prior.slice(-maxMessages).map((m) => ({
@@ -333,17 +359,27 @@ async function toEvent(
   };
 }
 
+/**
+ * `postOverride` (when supplied) applies to the FIRST call to `post()` only
+ * — typically the thinking-indicator's edit-in-place. Every subsequent call
+ * is a genuine new message via `thread.post()`, so a multi-part answer never
+ * silently collapses into repeated edits of the same message.
+ */
 function toTagThread(
   thread: BotThread,
   postOverride?: (text: string) => Promise<void>,
 ): TagThread {
+  let overrideConsumed = false;
   return {
     id: thread.id,
-    post:
-      postOverride ??
-      (async (text) => {
-        await thread.post(text);
-      }),
+    post: async (text) => {
+      if (postOverride && !overrideConsumed) {
+        overrideConsumed = true;
+        await postOverride(text);
+        return;
+      }
+      await thread.post(text);
+    },
     subscribe: () => thread.subscribe(),
   };
 }
@@ -358,6 +394,19 @@ type PreparedDispatch = {
    * forever. No-op when no placeholder was started.
    */
   notifyFailure(): Promise<void>;
+  /**
+   * Call after the host's handler returns *without* throwing. A silently
+   * declined dispatch (blessed behavior — see `TagDispatch.onThreadMessage`,
+   * and the default outcome for most ambient messages) never calls
+   * `TagThread.post()`, so without this the placeholder would be left
+   * reading "thinking" forever, exactly the failure mode this affordance
+   * exists to prevent. Deletes the placeholder rather than replacing it
+   * with a "nothing to add" message — a mechanism-only package has no
+   * useful text to put there, and silence is the correct outcome, not
+   * something to announce. No-op when no placeholder was started, or the
+   * host already posted through it.
+   */
+  resolveIfUnused(): Promise<void>;
 };
 
 /**
@@ -372,6 +421,7 @@ async function prepareDispatch(
   message: BotMessage,
   options: WireOptions,
   logger: Logger,
+  ackWarnState: AckWarnState,
 ): Promise<PreparedDispatch> {
   if (options.acknowledge) {
     await acknowledgeMessage(
@@ -379,22 +429,29 @@ async function prepareDispatch(
       message,
       options.acknowledgeEmoji ?? DEFAULT_ACKNOWLEDGE_EMOJI,
       logger,
+      ackWarnState,
     );
   }
 
   let postOverride: ((text: string) => Promise<void>) | undefined;
   let notifyFailure: (() => Promise<void>) | undefined;
+  let resolveIfUnused: (() => Promise<void>) | undefined;
   if (options.thinkingIndicator) {
-    const edit = await startThinkingIndicator(
+    const sent = await startThinkingIndicator(
       thread,
       options.thinkingIndicatorText ?? DEFAULT_THINKING_INDICATOR_TEXT,
       logger,
     );
-    if (edit) {
-      postOverride = edit;
+    if (sent) {
+      let used = false;
+      postOverride = async (text: string) => {
+        used = true;
+        await sent.edit(text);
+      };
       notifyFailure = async () => {
+        used = true;
         try {
-          await edit(
+          await sent.edit(
             options.thinkingIndicatorErrorText ??
               DEFAULT_THINKING_INDICATOR_ERROR_TEXT,
           );
@@ -407,18 +464,33 @@ async function prepareDispatch(
           );
         }
       };
+      resolveIfUnused = async () => {
+        if (used) return;
+        used = true;
+        try {
+          await sent.delete();
+        } catch (err) {
+          logger.warn(
+            `tag-slack: failed to retract an unused thinking-indicator ` +
+              `placeholder: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      };
     }
   }
 
   return {
     tagThread: toTagThread(thread, postOverride),
     notifyFailure: notifyFailure ?? (async () => {}),
+    resolveIfUnused: resolveIfUnused ?? (async () => {}),
   };
 }
 
 /** Register mention + subscribed-message handlers on the bot. */
 export function wireBot(bot: TagBot, options: WireOptions): void {
   const logger = options.logger ?? defaultLogger;
+  // Scoped to this wireBot() call (one bot/mount) — see `AckWarnState`.
+  const ackWarnState: AckWarnState = { warned: false };
 
   bot.onNewMention(async (thread, message) => {
     if (message.author.isMe) return;
@@ -433,14 +505,16 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
       options.threadHistory,
       logger,
     );
-    const { tagThread, notifyFailure } = await prepareDispatch(
+    const { tagThread, notifyFailure, resolveIfUnused } = await prepareDispatch(
       thread,
       message,
       options,
       logger,
+      ackWarnState,
     );
     try {
       await options.onTag(event, tagThread);
+      await resolveIfUnused();
     } catch (err) {
       await notifyFailure();
       throw err;
@@ -460,14 +534,16 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
         options.threadHistory,
         logger,
       );
-      const { tagThread, notifyFailure } = await prepareDispatch(
+      const { tagThread, notifyFailure, resolveIfUnused } = await prepareDispatch(
         thread,
         message,
         options,
         logger,
+        ackWarnState,
       );
       try {
         await options.onTag(event, tagThread);
+        await resolveIfUnused();
       } catch (err) {
         await notifyFailure();
         throw err;
@@ -477,7 +553,16 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
     // Ambient delivery is for other humans talking in a thread the bot
     // already joined, not for other bots/integrations posting into it — a
     // bot replying to another bot is exactly the loop this mechanism must
-    // never create.
+    // never create. A platform-confirmed bot is rejected immediately
+    // (cheap, no need to resolve anything further); when the platform can
+    // only say "unknown", the guard defers to the *resolved* isBot from
+    // `toEvent` (a `users.info` lookup, when wired, is a more authoritative
+    // source than an ambiguous platform report — see toEvent). Unlike
+    // author resolution generally, where "unknown" stays "unknown" and the
+    // host decides what to do with that, ambient dispatch is unsolicited —
+    // nobody asked the bot to look at this message — so the safe default
+    // inverts here: an unresolved "unknown" must NOT dispatch ambiently;
+    // only a confirmed `false` may.
     if (options.onThreadMessage && message.author.isBot !== true) {
       const event = await toEvent(
         message,
@@ -487,14 +572,17 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
         options.threadHistory,
         logger,
       );
-      const { tagThread, notifyFailure } = await prepareDispatch(
+      if (event.author.isBot !== false) return;
+      const { tagThread, notifyFailure, resolveIfUnused } = await prepareDispatch(
         thread,
         message,
         options,
         logger,
+        ackWarnState,
       );
       try {
         await options.onThreadMessage(event, tagThread);
+        await resolveIfUnused();
       } catch (err) {
         await notifyFailure();
         throw err;

@@ -63,6 +63,7 @@ function fakeReactableThread(addReaction: (emoji: string) => Promise<unknown>) {
     createSentMessageFromMessage: (message: unknown): BotSentMessage => ({
       edit: async () => {},
       addReaction,
+      delete: async () => {},
     }),
   };
   return { thread: reactable, posts, isSubscribed };
@@ -88,6 +89,9 @@ function fakeEditableThread(firstPostThrows = false, editable = true) {
           events.push(`edit:${text}`);
         },
         addReaction: async () => {},
+        delete: async () => {
+          events.push("delete");
+        },
       } satisfies BotSentMessage;
     },
     subscribe: async () => {},
@@ -635,14 +639,16 @@ describe("wireBot thinkingIndicator", () => {
     const { bot, handlers } = fakeBot();
     const { thread, events } = fakeEditableThread();
     wireBot(bot, {
-      onTag: async () => {},
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("the real answer");
+      },
       thinkingIndicator: true,
       thinkingIndicatorText: "_On it…_",
     });
 
     await handlers.mention!(thread, { text: "hi", author: human });
 
-    expect(events).toEqual(["post:_On it…_"]);
+    expect(events).toEqual(["post:_On it…_", "edit:the real answer"]);
   });
 
   test("a throwing onTag replaces the placeholder with an error, not silence", async () => {
@@ -731,11 +737,13 @@ describe("wireBot thinkingIndicator", () => {
         addReaction: async (emoji) => {
           order.push(`react:${emoji}`);
         },
+        delete: async () => {},
       }),
     };
     wireBot(bot, {
-      onTag: async () => {
+      onTag: async (_event, tagThread) => {
         order.push("onTag");
+        await tagThread.post("the real answer");
       },
       acknowledge: true,
       thinkingIndicator: true,
@@ -744,7 +752,7 @@ describe("wireBot thinkingIndicator", () => {
     await handlers.mention!(thread, { text: "hi", author: human });
 
     expect(order).toEqual(["react:eyes", "onTag"]);
-    expect(events).toEqual(["post:_Working on it…_"]);
+    expect(events).toEqual(["post:_Working on it…_", "edit:the real answer"]);
   });
 
   test("thinkingIndicator unset behaves as a normal post", async () => {
@@ -759,5 +767,132 @@ describe("wireBot thinkingIndicator", () => {
     await handlers.mention!(thread, { text: "hi", author: human });
 
     expect(events).toEqual(["post:normal reply"]);
+  });
+
+  // Regression: a host returning without posting (blessed by TagDispatch —
+  // e.g. onThreadMessage deciding there's nothing to add) used to leave the
+  // placeholder reading "_Working on it…_" forever.
+  test("a host that returns without posting has the placeholder deleted, not left thinking", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread();
+    wireBot(bot, {
+      onTag: async () => {
+        // decides there's nothing worth replying with
+      },
+      thinkingIndicator: true,
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(events).toEqual(["post:_Working on it…_", "delete"]);
+  });
+
+  test("a host that posts through the placeholder does not also get it deleted", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread();
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("the real answer");
+      },
+      thinkingIndicator: true,
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(events).toEqual(["post:_Working on it…_", "edit:the real answer"]);
+  });
+
+  // Regression: a second thread.post() used to silently re-edit the same
+  // placeholder, losing the first half of a multi-part answer.
+  test("only the FIRST post() edits the placeholder; a second post() is a new message", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread();
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("part one");
+        await tagThread.post("part two");
+      },
+      thinkingIndicator: true,
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(events).toEqual([
+      "post:_Working on it…_",
+      "edit:part one",
+      "post:part two",
+    ]);
+  });
+});
+
+describe("wireBot ambient bot-guard", () => {
+  test("an ambient message whose isBot only resolves to true via userLookup is still blocked", async () => {
+    // Regression: the guard used to run on the raw platform isBot flag
+    // *before* userLookup resolution, so a platform report of "unknown"
+    // that resolved to `true` via users.info still reached onThreadMessage.
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    let calls = 0;
+    wireBot(bot, {
+      onTag: async () => {},
+      onThreadMessage: async () => {
+        calls += 1;
+      },
+      userLookup: async () => ({
+        ok: true,
+        profile: {
+          email: undefined,
+          emailVerified: false,
+          isRestricted: false,
+          isBot: true,
+        },
+      }),
+    });
+
+    await handlers.subscribed!(thread, {
+      text: "deploy finished",
+      author: { ...human, isBot: "unknown" as const },
+    });
+
+    expect(calls).toBe(0);
+  });
+
+  test("an ambient message with unresolved isBot ('unknown') never dispatches — fails closed, not open", async () => {
+    // Regression: the guard was `message.author.isBot !== true`, which lets
+    // "unknown" provenance through. Bot-to-bot loops are the disaster case
+    // this guard exists to prevent, so unresolved provenance must deny.
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    let calls = 0;
+    wireBot(bot, {
+      onTag: async () => {},
+      onThreadMessage: async () => {
+        calls += 1;
+      },
+      // no userLookup: isBot stays "unknown" through toEvent's resolution
+    });
+
+    await handlers.subscribed!(thread, {
+      text: "deploy finished",
+      author: { ...human, isBot: "unknown" as const },
+    });
+
+    expect(calls).toBe(0);
+  });
+
+  test("an ambient message confirmed human (isBot: false) still dispatches", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    let calls = 0;
+    wireBot(bot, {
+      onTag: async () => {},
+      onThreadMessage: async () => {
+        calls += 1;
+      },
+    });
+
+    await handlers.subscribed!(thread, { text: "hi", author: human });
+
+    expect(calls).toBe(1);
   });
 });
