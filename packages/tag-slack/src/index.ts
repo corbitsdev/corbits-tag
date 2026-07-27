@@ -17,17 +17,20 @@ import { createSlackAdapter } from "@chat-adapter/slack";
 
 import { wireBot, type TagBot } from "./wire.ts";
 import { createSlackUserLookup } from "./slack-users.ts";
+import { defaultLogger, type Logger } from "./logger.ts";
 import type { TagDispatch } from "@corbits/tag-core";
 
 export { wireBot } from "./wire.ts";
-export type { BotMessage, BotThread, TagBot } from "./wire.ts";
+export type { BotHistoryMessage, BotMessage, BotThread, TagBot } from "./wire.ts";
 export { createSlackUserLookup } from "./slack-users.ts";
 export type {
   SlackUserLookup,
   SlackUserLookupResult,
   SlackUserProfile,
 } from "./slack-users.ts";
+export type { Logger } from "./logger.ts";
 export type {
+  PriorTurn,
   TagAuthor,
   TagDispatch,
   TagEvent,
@@ -52,6 +55,25 @@ export type MountSlackTagOptions = TagDispatch & {
   slack?: { botToken: string; signingSecret: string };
   /** Subscribe to the thread on first mention (ambient membership). Default: true. */
   subscribeOnMention?: boolean;
+  /**
+   * Resolves a Slack user id to email/restriction info. Defaults to the
+   * package's own `createSlackUserLookup(botToken)` whenever a bot token is
+   * available; set this to override that default (or to `undefined`
+   * explicitly if you never want identity resolution even though a token is
+   * present).
+   */
+  userLookup?: import("./slack-users.ts").SlackUserLookup;
+  /**
+   * Fetch each thread's prior messages and attach them to `TagEvent.priorTurns`
+   * (see `@corbits/tag-core`). Off by default. `maxMessages` bounds the raw
+   * fetch (default 50); how many of those a host actually uses is its call.
+   */
+  threadHistory?: { maxMessages?: number };
+  /**
+   * Logging seam for this package's fail-soft paths. Defaults to
+   * `console.warn`.
+   */
+  logger?: Logger;
 };
 
 export type MountedSlackTag = {
@@ -85,13 +107,19 @@ export function mountSlackTag(
     },
     state: options.state,
   });
+  const logger = options.logger ?? defaultLogger;
   // Auto-wire identity lookup when a bot token is available so hosts don't
   // each reimplement users.info. Unresolved facts stay "unknown" on TagAuthor
-  // (see README "Mapping authors to identities").
+  // (see README "Mapping authors to identities"). A host-supplied
+  // `options.userLookup` always wins — auto-wiring must never silently
+  // replace it just because a token happens to be present.
   const botToken = options.slack?.botToken ?? process.env.SLACK_BOT_TOKEN;
   wireBot(bot, {
     ...options,
-    ...(botToken ? { userLookup: createSlackUserLookup(botToken) } : {}),
+    logger,
+    ...(botToken && !options.userLookup
+      ? { userLookup: createSlackUserLookup(botToken, { logger }) }
+      : {}),
   });
 
   const path = options.path ?? DEFAULT_PATH;
