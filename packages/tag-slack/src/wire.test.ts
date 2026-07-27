@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { TagEvent } from "@corbits/tag-core";
 import {
   wireBot,
+  type BotHistoryMessage,
   type BotMessage,
   type BotThread,
   type TagBot,
@@ -25,7 +26,10 @@ function fakeBot() {
   return { bot, handlers };
 }
 
-function fakeThread(id = "C1:1721800000.000100") {
+function fakeThread(
+  id = "C1:1721800000.000100",
+  history?: { messages: BotHistoryMessage[]; refresh?(): Promise<void> },
+) {
   const posts: string[] = [];
   let subscribed = false;
   const thread: BotThread = {
@@ -36,6 +40,16 @@ function fakeThread(id = "C1:1721800000.000100") {
     subscribe: async () => {
       subscribed = true;
     },
+    ...(history
+      ? {
+          refresh:
+            history.refresh ??
+            (async () => {
+              /* recentMessages already set */
+            }),
+          recentMessages: history.messages,
+        }
+      : {}),
   };
   return { thread, posts, isSubscribed: () => subscribed };
 }
@@ -290,5 +304,159 @@ describe("userLookup failures never drop a message", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]!.author.isRestricted).toBe("unknown");
     expect(seen[0]!.author.emailVerified).toBe("unknown");
+  });
+});
+
+describe("wireBot isBot resolution", () => {
+  test("a confirmed profile overrides an ambiguous platform-reported isBot", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => void seen.push(event),
+      userLookup: async () => ({
+        ok: true,
+        profile: {
+          email: undefined,
+          emailVerified: false,
+          isRestricted: false,
+          isBot: true,
+        },
+      }),
+    });
+
+    await handlers.mention!(thread, {
+      text: "hi",
+      author: { ...human, isBot: "unknown" },
+    });
+
+    expect(seen[0]!.author.isBot).toBe(true);
+  });
+
+  test("a confirmed platform-reported isBot is never overridden by the profile", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => void seen.push(event),
+      userLookup: async () => ({
+        ok: true,
+        profile: {
+          email: undefined,
+          emailVerified: false,
+          isRestricted: false,
+          isBot: true,
+        },
+      }),
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(seen[0]!.author.isBot).toBe(false);
+  });
+});
+
+describe("wireBot threadHistory", () => {
+  test("without the option, priorTurns is absent entirely", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, { onTag: async (event) => void seen.push(event) });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(seen[0]!.priorTurns).toBeUndefined();
+  });
+
+  test("refreshes the thread and maps recentMessages to ordered PriorTurns", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread(undefined, {
+      messages: [
+        { text: "what's Modal?", author: { userId: "U123", isMe: false } },
+        {
+          text: "Modal is a serverless compute platform.",
+          author: { userId: "BOT1", isMe: true },
+        },
+        // last entry is the just-arrived message itself
+        { text: "what sources did you use?", author: { userId: "U123", isMe: false } },
+      ],
+    });
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => void seen.push(event),
+      threadHistory: {},
+    });
+
+    await handlers.mention!(thread, {
+      text: "what sources did you use?",
+      author: human,
+    });
+
+    expect(seen[0]!.priorTurns).toEqual([
+      { authorId: "U123", text: "what's Modal?", isBot: false },
+      {
+        authorId: "BOT1",
+        text: "Modal is a serverless compute platform.",
+        isBot: true,
+      },
+    ]);
+  });
+
+  test("maxMessages bounds the turns returned, keeping the most recent", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread(undefined, {
+      messages: [
+        { text: "turn 1", author: { userId: "U123", isMe: false } },
+        { text: "turn 2", author: { userId: "U123", isMe: false } },
+        { text: "turn 3", author: { userId: "U123", isMe: false } },
+        { text: "current", author: { userId: "U123", isMe: false } },
+      ],
+    });
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => void seen.push(event),
+      threadHistory: { maxMessages: 1 },
+    });
+
+    await handlers.mention!(thread, { text: "current", author: human });
+
+    expect(seen[0]!.priorTurns).toEqual([
+      { authorId: "U123", text: "turn 3", isBot: false },
+    ]);
+  });
+
+  test("a failed refresh yields no history rather than dropping the mention", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread(undefined, {
+      messages: [],
+      refresh: async () => {
+        throw new Error("slack unavailable");
+      },
+    });
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => void seen.push(event),
+      threadHistory: {},
+      logger: { warn: () => {} },
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.priorTurns).toEqual([]);
+  });
+
+  test("a bot too old to support refresh yields no history, not an error", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread(); // no refresh/recentMessages at all
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => void seen.push(event),
+      threadHistory: {},
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(seen[0]!.priorTurns).toEqual([]);
   });
 });

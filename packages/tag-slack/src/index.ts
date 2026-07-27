@@ -21,7 +21,7 @@ import { defaultLogger, type Logger } from "./logger.ts";
 import type { TagDispatch } from "@corbits/tag-core";
 
 export { wireBot } from "./wire.ts";
-export type { BotMessage, BotThread, TagBot } from "./wire.ts";
+export type { BotHistoryMessage, BotMessage, BotThread, TagBot } from "./wire.ts";
 export { createSlackUserLookup } from "./slack-users.ts";
 export type {
   SlackUserLookup,
@@ -30,6 +30,7 @@ export type {
 } from "./slack-users.ts";
 export type { Logger } from "./logger.ts";
 export type {
+  PriorTurn,
   TagAuthor,
   TagDispatch,
   TagEvent,
@@ -59,10 +60,16 @@ export type MountSlackTagOptions = TagDispatch & {
    * package's own `createSlackUserLookup(botToken)` whenever a bot token is
    * available; set this to override that default (or to `undefined`
    * explicitly if you never want identity resolution even though a token is
-   * present — that explicit `undefined` must be honored, not treated the
-   * same as "never mentioned it").
+   * present — that explicit `undefined` is honored, not treated the same as
+   * "never mentioned it").
    */
   userLookup?: import("./slack-users.ts").SlackUserLookup;
+  /**
+   * Fetch each thread's prior messages and attach them to `TagEvent.priorTurns`
+   * (see `@corbits/tag-core`). Off by default. `maxMessages` bounds the raw
+   * fetch (default 50); how many of those a host actually uses is its call.
+   */
+  threadHistory?: { maxMessages?: number };
   /**
    * Logging seam for this package's fail-soft paths. Defaults to
    * `console.warn`.
