@@ -43,6 +43,22 @@ export type TagAuthor = {
   isRestricted: boolean | "unknown";
 };
 
+/**
+ * One prior message in the thread, ordered oldest-first, surfaced so a host
+ * can answer follow-up questions ("what sources did you use?") that only
+ * make sense with the conversation so far. The platform package fetches and
+ * normalizes these; whether to use them, how many, and how to render them
+ * into a prompt is entirely the host's call.
+ */
+export type PriorTurn = {
+  /** Platform-unique user id of whoever sent this prior message. */
+  authorId: string;
+  /** Message text, same normalization as `TagEvent.text`. */
+  text: string;
+  /** Whether this prior message was posted by the bot itself. */
+  isBot: boolean;
+};
+
 /** A normalized mention or thread message, independent of platform. */
 export type TagEvent = {
   /** Platform adapter name that produced the event (e.g. "slack"). */
@@ -54,6 +70,23 @@ export type TagEvent = {
   author: TagAuthor;
   /** True when the bot was explicitly @-mentioned; false for ambient subscribed messages. */
   isMention: boolean;
+  /**
+   * How this event was triggered: `"mention"` for an explicit @-mention,
+   * `"ambient"` for an untagged message in a thread the bot already
+   * subscribed to. Redundant with `isMention` today, but named so a host
+   * reading `TagEvent` sees the addressed/untagged distinction as its own
+   * concept rather than inferring it from a boolean meant for the mention
+   * check specifically — future trigger kinds (if any) extend this field,
+   * not `isMention`.
+   */
+  trigger: "mention" | "ambient";
+  /**
+   * Prior messages in this thread, oldest-first, not including the current
+   * message. Populated only when the platform package was asked to fetch
+   * thread history (see e.g. `@corbits/tag-slack`'s `threadHistory` option);
+   * `undefined` when it wasn't asked to, empty when there simply is none.
+   */
+  priorTurns?: PriorTurn[];
 };
 
 /**

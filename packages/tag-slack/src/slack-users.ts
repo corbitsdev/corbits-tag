@@ -11,9 +11,10 @@
  * restriction status rarely change, and the alternative is an API call on
  * every single mention.
  */
+import { defaultLogger, type Logger } from "./logger.ts";
 
 const SLACK_USERS_INFO_URL = "https://slack.com/api/users.info";
-const REQUEST_TIMEOUT_MS = 5_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
 export type SlackUserProfile = {
   email: string | undefined;
@@ -84,7 +85,23 @@ function readSlackUser(body: unknown): SlackUser | undefined {
   };
 }
 
-export function createSlackUserLookup(botToken: string): SlackUserLookup {
+export type SlackUserLookupOptions = {
+  /** Logging seam; defaults to `console.warn`. */
+  logger?: Logger;
+  /**
+   * Per-request timeout for the `users.info` call. A deployment on a slower
+   * network path may need more headroom than the default; a deployment that
+   * wants to fail fast toward "unknown" sooner may want less.
+   */
+  requestTimeoutMs?: number;
+};
+
+export function createSlackUserLookup(
+  botToken: string,
+  options: SlackUserLookupOptions = {},
+): SlackUserLookup {
+  const logger = options.logger ?? defaultLogger;
+  const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   // Only settled outcomes are cached: a profile, or a definitive "no such
   // user". Anything transient is retried on the next mention.
   const cache = new Map<string, SlackUserLookupResult>();
@@ -100,7 +117,7 @@ export function createSlackUserLookup(botToken: string): SlackUserLookup {
         `${SLACK_USERS_INFO_URL}?user=${encodeURIComponent(userId)}`,
         {
           headers: { authorization: `Bearer ${botToken}` },
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          signal: AbortSignal.timeout(requestTimeoutMs),
         },
       );
       httpOk = res.ok;
@@ -108,7 +125,7 @@ export function createSlackUserLookup(botToken: string): SlackUserLookup {
     } catch (err) {
       // A transient Slack failure must not be cached — otherwise one blip
       // permanently denies that user for the life of the process.
-      console.warn(
+      logger.warn(
         `tag-slack: users.info failed for ${userId}: ${
           err instanceof Error ? err.message : String(err)
         }`,
@@ -118,7 +135,7 @@ export function createSlackUserLookup(botToken: string): SlackUserLookup {
 
     // A 429 or 5xx whose body happens to parse must not be read as a profile.
     if (!httpOk) {
-      console.warn(`tag-slack: users.info HTTP error for ${userId}`);
+      logger.warn(`tag-slack: users.info HTTP error for ${userId}`);
       return { ok: false, reason: "unavailable" };
     }
 
@@ -134,13 +151,13 @@ export function createSlackUserLookup(botToken: string): SlackUserLookup {
     if (!slackOk || user === undefined) {
       // `missing_scope` here almost always means users:read.email was not
       // granted — worth calling out by name, it is the #1 setup mistake.
-      console.warn(
+      logger.warn(
         `tag-slack: users.info returned not-ok for ${userId}: ${
           slackError ?? "unknown"
         }`,
       );
       if (slackError === "missing_scope") {
-        console.warn(
+        logger.warn(
           "tag-slack: the bot token is missing the `users:read.email` scope; " +
             "author identity cannot be established without it",
         );

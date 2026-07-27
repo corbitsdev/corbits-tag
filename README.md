@@ -31,6 +31,7 @@ bun add github:corbitsdev/corbits-tag
    `app_mentions:read`, `chat:write`, and `channels:history` scopes.
    Add `users:read` and `users:read.email` if your dispatch maps Slack authors
    to identities — see [Mapping authors to identities](#mapping-authors-to-identities).
+   Add `reactions:write` if you enable `acknowledge` — see note below.
 2. Point its event URL at your deployment: `https://<host>/api/tag/slack/webhook`.
 3. Provide `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` (env or the `slack`
    option).
@@ -60,6 +61,99 @@ mountSlackTag(app, {
 ```
 
 That mounts `POST /api/tag/slack/webhook` (configurable via `path`).
+
+## Acknowledging receipt
+
+Set `acknowledge: true` to have the package react to a message the moment it
+dispatches to your `onTag`/`onThreadMessage`, so a user can tell "seen, bot
+is working on it" apart from "never arrived." Off by default. Requires the
+bot token's **`reactions:write`** scope — **and the app must be reinstalled**
+after adding it, since scope changes don't take effect on an
+already-installed app. A missing scope logs once and never blocks
+answering. The emoji is configurable via `acknowledgeEmoji` (default
+`"eyes"`).
+
+## Thinking indicator
+
+Set `thinkingIndicator: true` to post a placeholder immediately on dispatch
+and transparently edit it in place when your dispatch calls
+`thread.post()` with the real answer — your call site needs no changes.
+Off by default. Text is configurable via `thinkingIndicatorText` (default a
+neutral, bot-name-free message).
+
+This needs `thread.post()` to return something both `edit`- **and**
+`delete`-capable (Chat SDK's `SentMessage` provides both). If either is
+missing, the placeholder is deleted if deletion is available, and this
+falls back to a normal post for the real answer; if deletion also isn't
+available, the placeholder message itself is left stranded in the thread
+(logged, but answering still proceeds — never blocked by this affordance).
+
+When both are available:
+
+- If your dispatch throws, the placeholder is replaced with
+  `thinkingIndicatorErrorText` rather than left reading "thinking" forever
+  — unless you had already posted the real answer through it first, in
+  which case that answer is preserved and the error text is not applied
+  over it.
+- If your dispatch returns without posting anything (a valid outcome —
+  silence is a legitimate answer), the placeholder is deleted rather than
+  left reading "thinking" forever or replaced with a "nothing to add"
+  message.
+
+(Slack's native `assistant.threads.setStatus` was investigated and rejected
+for this: it requires the app to be a registered Slack Assistant — an
+`assistant` feature block plus `assistant:write` scope — which this
+mechanism doesn't assume any host has configured.)
+
+## Ambient thread messages
+
+By default the mount only fires `onTag` for explicit `@mentions`. Once a
+thread is subscribed (on first mention, or manually via `thread.subscribe()`),
+every subsequent message in it also reaches your `onThreadMessage` hook, with
+`event.trigger` set to `"mention"` or `"ambient"` (`event.isMention` mirrors
+`trigger === "mention"`). Silence — not answering ambient messages — is the
+correct default posture; `onThreadMessage` just delivers the event, it never
+decides whether to reply.
+
+**`onThreadMessage` requires identity resolution to actually fire.** The
+ambient path refuses to dispatch unless the author's `isBot` resolves to a
+confirmed `false` — an unresolved `"unknown"` is treated as "could be a bot"
+and dropped, because ambient dispatch is unsolicited and a bot answering
+another bot is the loop this guard exists to prevent. `isBot` only resolves
+away from `"unknown"` via `userLookup` (auto-wired whenever a bot token is
+present — see below). If you set `userLookup: undefined` to opt out, or have
+no bot token, `onThreadMessage` will silently never fire. This is a
+deliberate asymmetry with `TagAuthor` resolution generally, where `"unknown"`
+stays `"unknown"` and the host decides what to do with it.
+
+## Thread history
+
+Set `threadHistory: { maxMessages? }` to populate `TagEvent.priorTurns` with
+prior messages in the same thread, oldest-first, excluding the current
+message — useful for follow-up questions ("what sources did you use?") that
+only make sense with the conversation so far:
+
+```ts
+mountSlackTag(app, {
+  // ...
+  threadHistory: { maxMessages: 20 }, // default 50
+  onTag: async (event) => {
+    for (const turn of event.priorTurns ?? []) {
+      // turn.authorId, turn.text, turn.isBot
+    }
+  },
+});
+```
+
+Off by default — it costs one extra Slack API call (`conversations.replies`,
+via `Thread.refresh()`) per mention. `maxMessages` bounds how many of the
+thread's cached messages are *kept*, not the raw fetch; `maxMessages: 0`
+means "no history" (skips the refresh entirely), and a negative value throws
+rather than being silently reinterpreted. A failed refresh, or a Chat SDK
+bot too old to support `refresh()`, yields an empty `priorTurns` rather than
+dropping the event. What to do with prior turns — how many to actually use,
+whether to include the bot's own answers, how to fit them into a prompt — is
+entirely your call; this package only fetches and normalizes them.
 
 ## Security posture — read this
 
