@@ -9,6 +9,7 @@ import type {
   TagEvent,
   TagThread,
 } from "@corbits/tag-core";
+import { defaultLogger, type Logger } from "./logger.ts";
 import type {
   SlackUserLookup,
   SlackUserProfile,
@@ -55,6 +56,12 @@ export type WireOptions = TagDispatch & {
    * dropping the message.
    */
   userLookup?: SlackUserLookup;
+  /**
+   * Logging seam for this package's fail-soft paths (currently: a userLookup
+   * rejection). Defaults to `console.warn`; supply your own to route these
+   * into a host's existing log pipeline or to silence them in tests.
+   */
+  logger?: Logger;
 };
 
 /**
@@ -68,13 +75,14 @@ export type WireOptions = TagDispatch & {
 async function lookupProfile(
   userId: string,
   userLookup: SlackUserLookup | undefined,
+  logger: Logger,
 ): Promise<SlackUserProfile | undefined> {
   if (!userLookup) return undefined;
   try {
     const result = await userLookup(userId);
     return result.ok ? result.profile : undefined;
   } catch (err) {
-    console.warn(
+    logger.warn(
       `tag-slack: userLookup threw for ${userId}: ${
         err instanceof Error ? err.message : String(err)
       }`,
@@ -87,10 +95,11 @@ async function toEvent(
   message: BotMessage,
   thread: BotThread,
   isMention: boolean,
-  userLookup?: SlackUserLookup,
+  userLookup: SlackUserLookup | undefined,
+  logger: Logger,
 ): Promise<TagEvent> {
   const { userId, userName, fullName, isBot } = message.author;
-  const profile = await lookupProfile(userId, userLookup);
+  const profile = await lookupProfile(userId, userLookup, logger);
   const author: TagAuthor = {
     userId,
     userName,
@@ -124,12 +133,14 @@ function toTagThread(thread: BotThread): TagThread {
 
 /** Register mention + subscribed-message handlers on the bot. */
 export function wireBot(bot: TagBot, options: WireOptions): void {
+  const logger = options.logger ?? defaultLogger;
+
   bot.onNewMention(async (thread, message) => {
     if (message.author.isMe) return;
     if (options.subscribeOnMention !== false) {
       await thread.subscribe();
     }
-    const event = await toEvent(message, thread, true, options.userLookup);
+    const event = await toEvent(message, thread, true, options.userLookup, logger);
     await options.onTag(event, toTagThread(thread));
   });
 
@@ -138,12 +149,12 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
     // Mentions inside subscribed threads still land on onTag: an explicit
     // @mention always gets the mention treatment, ambient traffic doesn't.
     if (message.isMention === true) {
-      const event = await toEvent(message, thread, true, options.userLookup);
+      const event = await toEvent(message, thread, true, options.userLookup, logger);
       await options.onTag(event, toTagThread(thread));
       return;
     }
     if (options.onThreadMessage) {
-      const event = await toEvent(message, thread, false, options.userLookup);
+      const event = await toEvent(message, thread, false, options.userLookup, logger);
       await options.onThreadMessage(event, toTagThread(thread));
     }
   });
