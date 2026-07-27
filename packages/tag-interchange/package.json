@@ -1,0 +1,41 @@
+{
+  "name": "@corbits/tag-interchange",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Binds chat authors to Interchange principals",
+  "type": "module",
+  "module": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "license": "LGPL-2.1-only",
+  "dependencies": {
+    "@intx/db": "0.2.2",
+    "drizzle-orm": "0.45.2"
+  },
+  "author": "Sawyer Cutler <sawyer@dirtroad.dev>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/corbitsdev/corbits-tag.git"
+  },
+  "homepage": "https://github.com/corbitsdev/corbits-tag#readme",
+  "bugs": {
+    "url": "https://github.com/corbitsdev/corbits-tag/issues"
+  },
+  "keywords": [
+    "chat",
+    "tag",
+    "ingress",
+    "interchange",
+    "principal",
+    "auth"
+  ],
+  "files": [
+    "src",
+    "!src/**/*.test.ts",
+    "README.md"
+  ]
+}

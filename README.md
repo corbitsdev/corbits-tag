@@ -2,10 +2,11 @@
 
 Chat-tag **ingress** you mount onto an [Interchange](https://github.com/corbitsdev) hub: tag the bot in a thread and the mention arrives at your dispatch as a normalized event; your reply lands back in the thread.
 
-Two packages:
+Three packages:
 
 - **`@corbits/tag-core`** — transport-agnostic contracts: `TagEvent`, `TagThread`, `TagDispatch`. Write dispatch logic once.
 - **`@corbits/tag-slack`** — `mountSlackTag(app, opts)` for Slack, built on the [Chat SDK](https://chat-sdk.dev) Slack adapter. Telegram/Teams adapters follow the same contract later.
+- **`@corbits/tag-interchange`** — optional Interchange host binding: map a chat author to a real principal by email, or provision one on first contact. No shared or synthesized principal at any point.
 
 This is a **bridge, not a tool**: no agent calls it — it pushes thread events _into_ your system and relays replies out. What a tag means (answer, start a workflow, stay silent) is entirely the host's dispatch.
 
@@ -16,8 +17,9 @@ bun add @corbits/tag-slack
 ```
 
 Requires Bun 1.2+. `@corbits/tag-core` comes with it; install core alone if
-you only want the contracts. Until the packages are on npm, install from the
-repository:
+you only want the contracts. Hosts mounting onto Interchange that need
+principal binding also install `@corbits/tag-interchange`. Until the packages
+are on npm, install from the repository:
 
 ```bash
 bun add github:corbitsdev/corbits-tag
@@ -61,8 +63,9 @@ That mounts `POST /api/tag/slack/webhook` (configurable via `path`).
 
 ## Security posture — read this
 
-- The route mounts **outside** your session auth: Slack is not a principal. The Chat SDK adapter verifies the **Slack request signature**; that is the only authentication this package performs.
+- The route mounts **outside** your session auth: Slack is not a principal. The Chat SDK adapter verifies the **Slack request signature**; that is the only authentication `@corbits/tag-slack` performs.
 - Everything past signature verification is the **host's trust decision** — starting with the mapping from Slack workspace/author to whatever identity your dispatch acts as. Do not let a tag reach privileged actions without deciding that mapping deliberately.
+- When mounting on Interchange, `@corbits/tag-interchange` is the recommended binding: chat email → real principal, never synthesized, never shared. `provisionPrincipal` is the explicit write for a first-contact author — it mints a real per-person account, not a shared one.
 - The bot's own messages are filtered out before dispatch (no self-trigger loops).
 
 ## Mapping authors to identities
