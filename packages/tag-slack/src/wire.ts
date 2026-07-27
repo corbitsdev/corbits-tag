@@ -176,6 +176,26 @@ const DEFAULT_THINKING_INDICATOR_ERROR_TEXT =
   "Something went wrong while generating a response.";
 
 /**
+ * Validates `threadHistory.maxMessages` once, at `wireBot()` setup —
+ * configuration is the trust boundary, not each incoming message. Rejects
+ * anything that isn't a non-negative integer: `NaN` (e.g. an unparsed
+ * `Number(process.env.MAX_MESSAGES)`) fails both `< 0` and `=== 0`, so it
+ * used to fall through to `slice(-NaN)`, which is `slice(0)` — the entire
+ * history. Fractional values (`2.5`) used to silently truncate via
+ * `Array.prototype.slice` instead of being rejected as the misconfiguration
+ * they are.
+ */
+function validateMaxMessages(maxMessages: number | undefined): number {
+  const value = maxMessages ?? DEFAULT_MAX_HISTORY_MESSAGES;
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `tag-slack: threadHistory.maxMessages must be a non-negative integer, got ${value}`,
+    );
+  }
+  return value;
+}
+
+/**
  * Mutable "have we warned yet" flag for the acknowledge affordance, scoped
  * to a single `wireBot()` call (one bot/mount) rather than the module —
  * a module-level flag would let one workspace's missing scope silence the
@@ -276,6 +296,17 @@ async function startThinkingIndicator(
           `${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  } else if (hasEdit) {
+    // Has `edit` but not `delete`: this affordance can't retract it, so it
+    // stays in the thread — logged accurately (not "can't be edited or
+    // deleted", which was true of neither this path nor its sibling below).
+    logger.warn(
+      `tag-slack: thinking-indicator placeholder ("${text}") supports ` +
+        `edit() but not delete() — thread.post() must return a Chat SDK ` +
+        `SentMessage supporting both for this affordance to fully work. ` +
+        `Falling back to a normal reply; the placeholder will remain in ` +
+        `the thread since it can't be retracted.`,
+    );
   } else {
     logger.warn(
       `tag-slack: thinking-indicator placeholder ("${text}") can't be ` +
@@ -301,11 +332,11 @@ async function fetchPriorTurns(
   maxMessages: number,
   logger: Logger,
 ): Promise<PriorTurn[]> {
-  if (maxMessages < 0) {
-    throw new Error(
-      `tag-slack: threadHistory.maxMessages must be >= 0, got ${maxMessages}`,
-    );
-  }
+  // `maxMessages` is validated once, at `wireBot()` setup time (see
+  // `validateMaxMessages`) — never here, per-message. A bad config value
+  // must fail loudly and immediately at startup, not throw out of every
+  // event handler and silently drop all traffic.
+  //
   // 0 means "no history" — return without even paying for the refresh, and
   // without falling into `slice(-0)`, which is `slice(0)`: the *entire*
   // array, not zero elements.
@@ -382,7 +413,12 @@ async function toEvent(
   thread: BotThread,
   isMention: boolean,
   userLookup: SlackUserLookup | undefined,
-  threadHistory: { maxMessages?: number } | undefined,
+  /**
+   * Already-validated (see `validateMaxMessages`, called once at
+   * `wireBot()` setup) — `undefined` means `threadHistory` is off entirely,
+   * never a value in need of re-checking here.
+   */
+  maxMessages: number | undefined,
   logger: Logger,
 ): Promise<TagEvent> {
   const { userId, userName, fullName, isBot } = message.author;
@@ -404,14 +440,10 @@ async function toEvent(
     isRestricted: profile === undefined ? "unknown" : profile.isRestricted,
     ...(profile?.email !== undefined ? { email: profile.email } : {}),
   };
-  const priorTurns = threadHistory
-    ? await fetchPriorTurns(
-        thread,
-        message,
-        threadHistory.maxMessages ?? DEFAULT_MAX_HISTORY_MESSAGES,
-        logger,
-      )
-    : undefined;
+  const priorTurns =
+    maxMessages !== undefined
+      ? await fetchPriorTurns(thread, message, maxMessages, logger)
+      : undefined;
   return {
     platform: "slack",
     threadId: thread.id,
@@ -428,6 +460,19 @@ async function toEvent(
  * — typically the thinking-indicator's edit-in-place. Every subsequent call
  * is a genuine new message via `thread.post()`, so a multi-part answer never
  * silently collapses into repeated edits of the same message.
+ *
+ * `overrideConsumed` here and `used` in `prepareDispatch` are deliberately
+ * separate flags, not the same one-shot state: `overrideConsumed` decides
+ * *routing* — whether this particular `post()` call reaches `postOverride`
+ * at all — the instant the first call happens, regardless of whether
+ * `postOverride` goes on to succeed or throw. `used` (in `prepareDispatch`)
+ * decides *resolution* — whether the placeholder still needs `notifyFailure`
+ * or `resolveIfUnused` to act on it — which can only be known once the edit
+ * itself has settled. Merging them would conflate "this call was routed to
+ * the placeholder" with "the placeholder is resolved", which are different
+ * facts at different times (e.g. mid-flight while `postOverride`'s `edit()`
+ * is still pending). Unifying into one placeholder-owned state machine is a
+ * real improvement, but a separate refactor — not bundled into this fix.
  */
 function toTagThread(
   thread: BotThread,
@@ -507,18 +552,28 @@ async function prepareDispatch(
       logger,
     );
     if (sent) {
-      // Shared by all three closures below: whichever of them runs FIRST
-      // decides the placeholder's fate, and the other two must defer to it.
-      // In particular, a host that posts the real answer and *then* throws
-      // (an error after a successful reply, e.g. in cleanup code) must not
-      // have that answer clobbered by `notifyFailure`'s error text — the
-      // answer already resolved the placeholder, so `notifyFailure` here
-      // checks `used` before touching it. Any future consumer of `used`
-      // must check it the same way before acting, not just set it.
+      // Shared by all three closures below: whichever of them SUCCEEDS
+      // FIRST decides the placeholder's fate, and the other two must defer
+      // to it. In particular, a host that posts the real answer and *then*
+      // throws (an error after a successful reply, e.g. in cleanup code)
+      // must not have that answer clobbered by `notifyFailure`'s error
+      // text — the answer already resolved the placeholder, so
+      // `notifyFailure` here checks `used` before touching it.
+      //
+      // Critically, `postOverride` sets `used` only AFTER `sent.edit()`
+      // resolves, not before: if the edit itself throws (e.g. the message
+      // was deleted out from under the bot), the placeholder was NOT
+      // actually resolved, so `notifyFailure` — which runs next, since the
+      // host's `await tagThread.post()` rejects and propagates out of
+      // `onTag`/`onThreadMessage` — must still be free to try resolving it
+      // into the error text rather than seeing `used` already true and
+      // silently doing nothing, stranding the placeholder AND losing the
+      // answer. Any future consumer of `used` must check it before acting,
+      // and set it only once its own action has actually succeeded.
       let used = false;
       postOverride = async (text: string) => {
-        used = true;
         await sent.edit(text);
+        used = true;
       };
       notifyFailure = async () => {
         if (used) return;
@@ -564,6 +619,11 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
   const logger = options.logger ?? defaultLogger;
   // Scoped to this wireBot() call (one bot/mount) — see `AckWarnState`.
   const ackWarnState: AckWarnState = { warned: false };
+  // Validated once, here, at setup — not per message (see
+  // `validateMaxMessages`). `undefined` means `threadHistory` is off.
+  const maxHistoryMessages = options.threadHistory
+    ? validateMaxMessages(options.threadHistory.maxMessages)
+    : undefined;
 
   bot.onNewMention(async (thread, message) => {
     if (message.author.isMe) return;
@@ -575,7 +635,7 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
       thread,
       true,
       options.userLookup,
-      options.threadHistory,
+      maxHistoryMessages,
       logger,
     );
     const { tagThread, notifyFailure, resolveIfUnused } = await prepareDispatch(
@@ -604,7 +664,7 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
         thread,
         true,
         options.userLookup,
-        options.threadHistory,
+        maxHistoryMessages,
         logger,
       );
       const { tagThread, notifyFailure, resolveIfUnused } = await prepareDispatch(
@@ -642,7 +702,7 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
         thread,
         false,
         options.userLookup,
-        options.threadHistory,
+        maxHistoryMessages,
         logger,
       );
       if (event.author.isBot !== false) return;

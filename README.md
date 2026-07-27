@@ -79,11 +79,26 @@ Set `thinkingIndicator: true` to post a placeholder immediately on dispatch
 and transparently edit it in place when your dispatch calls
 `thread.post()` with the real answer — your call site needs no changes.
 Off by default. Text is configurable via `thinkingIndicatorText` (default a
-neutral, bot-name-free message); if your dispatch throws, the placeholder is
-replaced with `thinkingIndicatorErrorText` rather than left reading
-"thinking" forever. If the placeholder can't be posted, or `thread.post()`
-doesn't return something edit-capable, this falls back to a normal post and
-answering proceeds unaffected.
+neutral, bot-name-free message).
+
+This needs `thread.post()` to return something both `edit`- **and**
+`delete`-capable (Chat SDK's `SentMessage` provides both). If either is
+missing, the placeholder is deleted if deletion is available, and this
+falls back to a normal post for the real answer; if deletion also isn't
+available, the placeholder message itself is left stranded in the thread
+(logged, but answering still proceeds — never blocked by this affordance).
+
+When both are available:
+
+- If your dispatch throws, the placeholder is replaced with
+  `thinkingIndicatorErrorText` rather than left reading "thinking" forever
+  — unless you had already posted the real answer through it first, in
+  which case that answer is preserved and the error text is not applied
+  over it.
+- If your dispatch returns without posting anything (a valid outcome —
+  silence is a legitimate answer), the placeholder is deleted rather than
+  left reading "thinking" forever or replaced with a "nothing to add"
+  message.
 
 (Slack's native `assistant.threads.setStatus` was investigated and rejected
 for this: it requires the app to be a registered Slack Assistant — an

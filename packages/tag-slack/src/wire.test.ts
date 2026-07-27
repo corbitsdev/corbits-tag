@@ -74,7 +74,11 @@ function fakeReactableThread(addReaction: (emoji: string) => Promise<unknown>) {
  * `thinkingIndicator` can wrap it — mirrors what Chat SDK's `Thread.post()`
  * actually returns.
  */
-function fakeEditableThread(firstPostThrows = false, editable = true) {
+function fakeEditableThread(
+  firstPostThrows = false,
+  editable = true,
+  editThrows = false,
+) {
   const events: string[] = [];
   let postCalls = 0;
   const thread: BotThread = {
@@ -86,6 +90,7 @@ function fakeEditableThread(firstPostThrows = false, editable = true) {
       if (!editable) return {};
       return {
         edit: async (text: string) => {
+          if (editThrows) throw new Error("edit failed");
           events.push(`edit:${text}`);
         },
         addReaction: async () => {},
@@ -514,19 +519,44 @@ describe("wireBot threadHistory", () => {
     expect(seen[0]!.priorTurns).toEqual([]);
   });
 
-  test("a negative maxMessages is rejected, not silently reinterpreted", async () => {
-    const { bot, handlers } = fakeBot();
-    const { thread } = fakeThread(undefined, {
-      messages: [{ text: "turn 1", author: { userId: "U123", isMe: false } }],
-    });
-    wireBot(bot, {
-      onTag: async () => {},
-      threadHistory: { maxMessages: -1 },
-    });
+  // Regression: maxMessages is now validated once at wireBot() setup, not
+  // per message inside the handler — a bad value must fail loudly and
+  // immediately at startup, not throw out of every event handler and
+  // silently drop all traffic.
+  test("a negative maxMessages throws synchronously from wireBot(), before any message arrives", () => {
+    const { bot } = fakeBot();
+    expect(() =>
+      wireBot(bot, {
+        onTag: async () => {},
+        threadHistory: { maxMessages: -1 },
+      }),
+    ).toThrow(/non-negative integer/);
+  });
 
-    await expect(
-      handlers.mention!(thread, { text: "hi", author: human }),
-    ).rejects.toThrow(/maxMessages/);
+  // Regression: `NaN < 0` and `NaN === 0` are both false, so `Number(NaN)`
+  // (e.g. an unparsed `Number(process.env.MAX_MESSAGES)`) sailed past both
+  // guards and reached `slice(-NaN)`, which is `slice(0)` — the entire
+  // history, not zero and not an error.
+  test("NaN maxMessages throws synchronously from wireBot()", () => {
+    const { bot } = fakeBot();
+    expect(() =>
+      wireBot(bot, {
+        onTag: async () => {},
+        threadHistory: { maxMessages: Number.NaN },
+      }),
+    ).toThrow(/non-negative integer/);
+  });
+
+  // Regression: a fractional bound silently truncated via
+  // `Array.prototype.slice` instead of being rejected as a misconfiguration.
+  test("a fractional maxMessages throws synchronously from wireBot()", () => {
+    const { bot } = fakeBot();
+    expect(() =>
+      wireBot(bot, {
+        onTag: async () => {},
+        threadHistory: { maxMessages: 2.5 },
+      }),
+    ).toThrow(/non-negative integer/);
   });
 
   test("a failed refresh yields no history rather than dropping the mention", async () => {
@@ -884,12 +914,41 @@ describe("wireBot thinkingIndicator", () => {
     expect(events).toEqual(["post:_Working on it…_", "edit:THE REAL ANSWER"]);
   });
 
+  // Regression: postOverride set `used = true` BEFORE awaiting sent.edit().
+  // If that edit rejected, the host's `await tagThread.post()` throws (the
+  // edit failure propagates), which reaches wireBot's catch → notifyFailure
+  // — but notifyFailure saw `used` already true and returned immediately,
+  // leaving the placeholder reading "_Working on it…_" forever with the
+  // answer never delivered. The round-3 fix for clobbering turned into a
+  // round-4 data-loss bug in the same line.
+  test("a failing post-edit still lets notifyFailure attempt to resolve the placeholder", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread(false, true, true);
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("THE REAL ANSWER");
+      },
+      thinkingIndicator: true,
+      logger: { warn: () => {} },
+    });
+
+    await expect(
+      handlers.mention!(thread, { text: "hi", author: human }),
+    ).rejects.toThrow("edit failed");
+
+    // The placeholder's edit() always fails in this fake, so the answer
+    // could never actually reach the thread either way — but notifyFailure
+    // must still have been given the chance to try (not silently no-op
+    // because `used` was set before the edit that never succeeded).
+    expect(events).toEqual(["post:_Working on it…_"]);
+  });
+
   // Regression: startThinkingIndicator only type-guarded `edit`, then cast
   // the placeholder to `BotSentMessage` (which promises `delete` too). A
   // placeholder with `edit` but no `delete` made `resolveIfUnused` call a
   // nonexistent method, log a warning, and leave the placeholder stranded —
   // the exact failure mode issue 1 exists to prevent.
-  test("a placeholder with edit but no delete is not used at all — falls back and is cleaned up", async () => {
+  test("a placeholder with edit but no delete is not used at all — falls back, placeholder left stranded", async () => {
     const { bot, handlers } = fakeBot();
     const events: string[] = [];
     let postCalls = 0;
