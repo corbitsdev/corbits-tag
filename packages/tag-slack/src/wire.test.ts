@@ -492,6 +492,43 @@ describe("wireBot threadHistory", () => {
     ]);
   });
 
+  // Regression: `prior.slice(-maxMessages)` with `maxMessages: 0` computed
+  // `slice(-0)`, which is `slice(0)` — the entire array — instead of zero
+  // elements.
+  test("maxMessages: 0 means no history, not unbounded history", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread(undefined, {
+      messages: [
+        { text: "turn 1", author: { userId: "U123", isMe: false } },
+        { text: "current", author: { userId: "U123", isMe: false } },
+      ],
+    });
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => void seen.push(event),
+      threadHistory: { maxMessages: 0 },
+    });
+
+    await handlers.mention!(thread, { text: "current", author: human });
+
+    expect(seen[0]!.priorTurns).toEqual([]);
+  });
+
+  test("a negative maxMessages is rejected, not silently reinterpreted", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread(undefined, {
+      messages: [{ text: "turn 1", author: { userId: "U123", isMe: false } }],
+    });
+    wireBot(bot, {
+      onTag: async () => {},
+      threadHistory: { maxMessages: -1 },
+    });
+
+    await expect(
+      handlers.mention!(thread, { text: "hi", author: human }),
+    ).rejects.toThrow(/maxMessages/);
+  });
+
   test("a failed refresh yields no history rather than dropping the mention", async () => {
     const { bot, handlers } = fakeBot();
     const { thread } = fakeThread(undefined, {
@@ -821,6 +858,108 @@ describe("wireBot thinkingIndicator", () => {
       "post:_Working on it…_",
       "edit:part one",
       "post:part two",
+    ]);
+  });
+
+  // Regression: notifyFailure edited the placeholder into the error text
+  // unconditionally, even when the host had already posted the real answer
+  // and only threw afterward (e.g. in post-answer cleanup) — destroying the
+  // answer the user was meant to see.
+  test("a post-then-throw does not clobber the already-posted answer with the error text", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread();
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("THE REAL ANSWER");
+        throw new Error("boom after posting");
+      },
+      thinkingIndicator: true,
+      logger: { warn: () => {} },
+    });
+
+    await expect(
+      handlers.mention!(thread, { text: "hi", author: human }),
+    ).rejects.toThrow("boom after posting");
+
+    expect(events).toEqual(["post:_Working on it…_", "edit:THE REAL ANSWER"]);
+  });
+
+  // Regression: startThinkingIndicator only type-guarded `edit`, then cast
+  // the placeholder to `BotSentMessage` (which promises `delete` too). A
+  // placeholder with `edit` but no `delete` made `resolveIfUnused` call a
+  // nonexistent method, log a warning, and leave the placeholder stranded —
+  // the exact failure mode issue 1 exists to prevent.
+  test("a placeholder with edit but no delete is not used at all — falls back and is cleaned up", async () => {
+    const { bot, handlers } = fakeBot();
+    const events: string[] = [];
+    let postCalls = 0;
+    const thread: BotThread = {
+      id: "C1:1721800000.000100",
+      post: async (text: string) => {
+        postCalls += 1;
+        events.push(`post:${text}`);
+        if (postCalls === 1) {
+          // edit-capable, but NOT delete-capable
+          return { edit: async () => {}, addReaction: async () => {} };
+        }
+        return {};
+      },
+      subscribe: async () => {},
+    };
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("normal reply");
+      },
+      thinkingIndicator: true,
+      logger: { warn: () => {} },
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    // Falls back to a normal post for the real answer rather than trying to
+    // edit a placeholder that can't be deleted if left unused.
+    expect(events).toEqual(["post:_Working on it…_", "post:normal reply"]);
+  });
+
+  // Regression: when the placeholder can be deleted but not edited, the old
+  // code returned `undefined` after the placeholder was already posted,
+  // leaving it stranded above the real answer forever.
+  test("a placeholder with delete but no edit is retracted instead of littering the thread", async () => {
+    const { bot, handlers } = fakeBot();
+    const events: string[] = [];
+    let postCalls = 0;
+    const thread: BotThread = {
+      id: "C1:1721800000.000100",
+      post: async (text: string) => {
+        postCalls += 1;
+        events.push(`post:${text}`);
+        if (postCalls === 1) {
+          // delete-capable, but NOT edit-capable
+          return {
+            delete: async () => {
+              events.push("delete");
+            },
+            addReaction: async () => {},
+          };
+        }
+        return {};
+      },
+      subscribe: async () => {},
+    };
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("normal reply");
+      },
+      thinkingIndicator: true,
+      logger: { warn: () => {} },
+    });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(events).toEqual([
+      "post:_Working on it…_",
+      "delete",
+      "post:normal reply",
     ]);
   });
 });

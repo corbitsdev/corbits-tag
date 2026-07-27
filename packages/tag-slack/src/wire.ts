@@ -94,6 +94,14 @@ export type WireOptions = TagDispatch & {
    *
    * May reject; a rejection is logged and treated as unresolved rather than
    * dropping the message.
+   *
+   * **Required for `onThreadMessage` to ever fire.** The ambient bot-guard
+   * denies dispatch whenever the resolved `isBot` is `"unknown"` (see
+   * `wireBot`'s bot-guard comment), and without a `userLookup` it is always
+   * `"unknown"` unless Slack's own event already confirms it one way or the
+   * other. A host that enables ambient replies (`onThreadMessage`) without
+   * wiring `userLookup` will typically see it never fire, silently — this
+   * is that coupling, made explicit.
    */
   userLookup?: SlackUserLookup;
   /**
@@ -105,6 +113,11 @@ export type WireOptions = TagDispatch & {
    * how many of *those* messages this mechanism keeps (default 50), by
    * slicing after the fact. It is not the host's turn budget; a host
    * decides how many of the returned turns to actually use.
+   *
+   * `maxMessages: 0` means "no history" (skips the refresh entirely — not
+   * "unbounded", which `-maxMessages` would silently become via
+   * `Array.prototype.slice`'s negative-index behavior). A negative value is
+   * rejected: it throws rather than being reinterpreted as some other slice.
    */
   threadHistory?: { maxMessages?: number };
   /**
@@ -133,9 +146,12 @@ export type WireOptions = TagDispatch & {
    * Post a placeholder message immediately on dispatch, then transparently
    * edit it in place when the host's dispatch calls `thread.post()` with the
    * real answer, instead of posting a second message. Off by default.
-   * Requires `thread.post()` to return something `edit`-capable (Chat SDK's
-   * `SentMessage`); without that this silently does nothing and the host's
-   * first `thread.post()` behaves as normal.
+   * Requires `thread.post()` to return something both `edit`- and
+   * `delete`-capable (Chat SDK's `SentMessage`); without both, the
+   * placeholder is deleted if possible and this falls back to a normal
+   * `thread.post()` for the real answer — if even deletion isn't
+   * available, the placeholder is left in the thread (logged) rather than
+   * blocking the answer.
    */
   thinkingIndicator?: boolean;
   /**
@@ -201,28 +217,28 @@ async function acknowledgeMessage(
 /**
  * Post a placeholder in `thread` and return it wrapped as a `BotSentMessage`
  * (edit in place, or delete if the host's dispatch never posts — see
- * `prepareDispatch`). `undefined` when the placeholder couldn't be
- * posted/wrapped — callers fall back to a normal `thread.post()`. Never
- * throws.
+ * `prepareDispatch`) only when it supports BOTH `edit` and `delete`.
+ * `undefined` otherwise — callers fall back to a normal `thread.post()` for
+ * the real answer. Never throws.
+ *
+ * This affordance needs both capabilities: `edit` to replace the
+ * placeholder with the real answer/an error, `delete` to retract it
+ * cleanly when the dispatch declines to answer (see `resolveIfUnused`) or
+ * when the placeholder itself turns out not to be usable (below). Requiring
+ * both up front, rather than degrading per-call, means every other function
+ * that receives a `BotSentMessage` here can rely on its full contract.
  */
 async function startThinkingIndicator(
   thread: BotThread,
   text: string,
   logger: Logger,
 ): Promise<BotSentMessage | undefined> {
+  let placeholder: unknown;
   try {
     // Chat SDK's `Thread.post()` already returns a `SentMessage` (edit/
     // delete/addReaction) — no need to re-wrap it via
     // `createSentMessageFromMessage`, which is for plain incoming messages.
-    const placeholder = await thread.post(text);
-    if (
-      typeof placeholder !== "object" ||
-      placeholder === null ||
-      typeof (placeholder as { edit?: unknown }).edit !== "function"
-    ) {
-      return undefined;
-    }
-    return placeholder as BotSentMessage;
+    placeholder = await thread.post(text);
   } catch (err) {
     logger.warn(
       `tag-slack: thinking-indicator placeholder failed, falling back to a ` +
@@ -230,6 +246,45 @@ async function startThinkingIndicator(
     );
     return undefined;
   }
+
+  const hasEdit =
+    typeof placeholder === "object" &&
+    placeholder !== null &&
+    typeof (placeholder as { edit?: unknown }).edit === "function";
+  const hasDelete =
+    typeof placeholder === "object" &&
+    placeholder !== null &&
+    typeof (placeholder as { delete?: unknown }).delete === "function";
+  if (hasEdit && hasDelete) {
+    return placeholder as BotSentMessage;
+  }
+
+  // The placeholder text is already posted at this point — `thread.post()`
+  // sent it regardless of what it returned. Falling back silently here (the
+  // old behavior) left that placeholder stranded above the real answer
+  // forever. Clean it up if we can; otherwise the orphan is an unavoidable
+  // consequence of a `thread.post()` that doesn't conform to the Chat SDK
+  // `SentMessage` contract this affordance requires, and is logged so it's
+  // not a silent surprise.
+  if (hasDelete) {
+    try {
+      await (placeholder as { delete(): Promise<unknown> }).delete();
+    } catch (err) {
+      logger.warn(
+        `tag-slack: thinking-indicator placeholder wasn't edit-capable and ` +
+          `couldn't be cleaned up either, leaving a stray "${text}" message: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  } else {
+    logger.warn(
+      `tag-slack: thinking-indicator placeholder ("${text}") can't be ` +
+        `edited or deleted — thread.post() must return a Chat SDK ` +
+        `SentMessage for this affordance to work. Falling back to a normal ` +
+        `reply, but the placeholder message itself will remain in the thread.`,
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -246,6 +301,15 @@ async function fetchPriorTurns(
   maxMessages: number,
   logger: Logger,
 ): Promise<PriorTurn[]> {
+  if (maxMessages < 0) {
+    throw new Error(
+      `tag-slack: threadHistory.maxMessages must be >= 0, got ${maxMessages}`,
+    );
+  }
+  // 0 means "no history" — return without even paying for the refresh, and
+  // without falling into `slice(-0)`, which is `slice(0)`: the *entire*
+  // array, not zero elements.
+  if (maxMessages === 0) return [];
   if (typeof thread.refresh !== "function") return [];
   try {
     await thread.refresh();
@@ -443,12 +507,21 @@ async function prepareDispatch(
       logger,
     );
     if (sent) {
+      // Shared by all three closures below: whichever of them runs FIRST
+      // decides the placeholder's fate, and the other two must defer to it.
+      // In particular, a host that posts the real answer and *then* throws
+      // (an error after a successful reply, e.g. in cleanup code) must not
+      // have that answer clobbered by `notifyFailure`'s error text — the
+      // answer already resolved the placeholder, so `notifyFailure` here
+      // checks `used` before touching it. Any future consumer of `used`
+      // must check it the same way before acting, not just set it.
       let used = false;
       postOverride = async (text: string) => {
         used = true;
         await sent.edit(text);
       };
       notifyFailure = async () => {
+        if (used) return;
         used = true;
         try {
           await sent.edit(

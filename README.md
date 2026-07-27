@@ -90,6 +90,56 @@ for this: it requires the app to be a registered Slack Assistant — an
 `assistant` feature block plus `assistant:write` scope — which this
 mechanism doesn't assume any host has configured.)
 
+## Ambient thread messages
+
+By default the mount only fires `onTag` for explicit `@mentions`. Once a
+thread is subscribed (on first mention, or manually via `thread.subscribe()`),
+every subsequent message in it also reaches your `onThreadMessage` hook, with
+`event.trigger` set to `"mention"` or `"ambient"` (`event.isMention` mirrors
+`trigger === "mention"`). Silence — not answering ambient messages — is the
+correct default posture; `onThreadMessage` just delivers the event, it never
+decides whether to reply.
+
+**`onThreadMessage` requires identity resolution to actually fire.** The
+ambient path refuses to dispatch unless the author's `isBot` resolves to a
+confirmed `false` — an unresolved `"unknown"` is treated as "could be a bot"
+and dropped, because ambient dispatch is unsolicited and a bot answering
+another bot is the loop this guard exists to prevent. `isBot` only resolves
+away from `"unknown"` via `userLookup` (auto-wired whenever a bot token is
+present — see below). If you set `userLookup: undefined` to opt out, or have
+no bot token, `onThreadMessage` will silently never fire. This is a
+deliberate asymmetry with `TagAuthor` resolution generally, where `"unknown"`
+stays `"unknown"` and the host decides what to do with it.
+
+## Thread history
+
+Set `threadHistory: { maxMessages? }` to populate `TagEvent.priorTurns` with
+prior messages in the same thread, oldest-first, excluding the current
+message — useful for follow-up questions ("what sources did you use?") that
+only make sense with the conversation so far:
+
+```ts
+mountSlackTag(app, {
+  // ...
+  threadHistory: { maxMessages: 20 }, // default 50
+  onTag: async (event) => {
+    for (const turn of event.priorTurns ?? []) {
+      // turn.authorId, turn.text, turn.isBot
+    }
+  },
+});
+```
+
+Off by default — it costs one extra Slack API call (`conversations.replies`,
+via `Thread.refresh()`) per mention. `maxMessages` bounds how many of the
+thread's cached messages are *kept*, not the raw fetch; `maxMessages: 0`
+means "no history" (skips the refresh entirely), and a negative value throws
+rather than being silently reinterpreted. A failed refresh, or a Chat SDK
+bot too old to support `refresh()`, yields an empty `priorTurns` rather than
+dropping the event. What to do with prior turns — how many to actually use,
+whether to include the bot's own answers, how to fit them into a prompt — is
+entirely your call; this package only fetches and normalizes them.
+
 ## Security posture — read this
 
 - The route mounts **outside** your session auth: Slack is not a principal. The Chat SDK adapter verifies the **Slack request signature**; that is the only authentication `@corbits/tag-slack` performs.

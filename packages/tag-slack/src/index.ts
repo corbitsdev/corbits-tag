@@ -68,12 +68,26 @@ export type MountSlackTagOptions = TagDispatch & {
    * explicitly if you never want identity resolution even though a token is
    * present — that explicit `undefined` is honored, not treated the same as
    * "never mentioned it").
+   *
+   * **Required for `onThreadMessage` (ambient replies) to ever fire.** The
+   * ambient bot-guard denies dispatch whenever the resolved `isBot` is
+   * `"unknown"`, which it always is without identity resolution (unless
+   * Slack's own event already confirms it). This is auto-wired by default
+   * whenever a bot token is present, so most hosts get ambient replies for
+   * free — but a host that sets `userLookup: undefined` to opt out, or has
+   * no bot token, will see `onThreadMessage` silently never fire.
    */
   userLookup?: import("./slack-users.ts").SlackUserLookup;
   /**
    * Fetch each thread's prior messages and attach them to `TagEvent.priorTurns`
-   * (see `@corbits/tag-core`). Off by default. `maxMessages` bounds the raw
-   * fetch (default 50); how many of those a host actually uses is its call.
+   * (see `@corbits/tag-core`). Off by default. `refresh()` itself takes no
+   * range argument — it re-fetches whatever the Chat SDK's own history
+   * cache holds; `maxMessages` bounds how many of *those* messages this
+   * mechanism keeps (default 50), by slicing after the fact, not the raw
+   * fetch. How many of those a host actually uses is its call.
+   *
+   * `maxMessages: 0` means "no history"; a negative value throws rather
+   * than being silently reinterpreted (see `WireOptions.threadHistory`).
    */
   threadHistory?: { maxMessages?: number };
   /**
@@ -95,8 +109,9 @@ export type MountSlackTagOptions = TagDispatch & {
    * Show a placeholder while the host works, then edit it in place with the
    * real answer. Off by default. Host call sites need no changes — the
    * `TagThread.post()` handed to `onTag`/`onThreadMessage` transparently
-   * edits the placeholder instead of posting twice. See `WireOptions` for
-   * the fallback/failure behavior.
+   * edits the placeholder instead of posting twice, and it is retracted
+   * (deleted) if the host's handler returns without posting. See
+   * `WireOptions` for the fallback/failure behavior.
    */
   thinkingIndicator?: boolean;
   /** Placeholder text for `thinkingIndicator`. Default: a neutral, bot-name-free message. */
