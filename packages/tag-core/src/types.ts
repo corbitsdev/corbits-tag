@@ -107,6 +107,23 @@ export type TagThreadPostOptions = {
    * caller is the only one who knows which case it is.
    */
   convertMarkdown?: boolean;
+  /**
+   * Platform-specific rich-content payload (e.g. Slack Block Kit blocks) the
+   * platform package renders alongside/instead of `text` where it can.
+   * `text` is still always sent — it's both the fallback rendering for
+   * clients that can't show rich content and the notification text. A
+   * platform package with no richer surface than plain text is free to
+   * ignore this entirely.
+   */
+  blocks?: unknown[];
+  /**
+   * Suppress the platform's link/media previews for this message (Slack
+   * `unfurl_links`/`unfurl_media`). Repeated posts about one source
+   * otherwise re-render the same preview card on every reply. Platforms
+   * without an unfurl concept ignore it.
+   */
+  unfurlLinks?: boolean;
+  unfurlMedia?: boolean;
 };
 
 /**
