@@ -29,6 +29,7 @@ export type {
   TagBot,
 } from "./wire.ts";
 export { createSlackUserLookup } from "./slack-users.ts";
+export { mdToMrkdwn } from "./mrkdwn.ts";
 export type {
   SlackUserLookup,
   SlackUserLookupResult,

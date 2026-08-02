@@ -11,6 +11,7 @@ import type {
   TagThread,
 } from "@corbits/tag-core";
 import { defaultLogger, type Logger } from "./logger.ts";
+import { mdToMrkdwn } from "./mrkdwn.ts";
 import type {
   SlackUserLookup,
   SlackUserProfile,
@@ -482,12 +483,17 @@ function toTagThread(
   return {
     id: thread.id,
     post: async (text) => {
+      // Normalize any markdown a host's dispatch produced (e.g. an LLM
+      // answer) into Slack mrkdwn before it ever reaches Slack — see
+      // `mdToMrkdwn`. Applied here so every caller of `TagThread.post()`
+      // gets it automatically, without each host having to remember to.
+      const mrkdwnText = mdToMrkdwn(text);
       if (postOverride && !overrideConsumed) {
         overrideConsumed = true;
-        await postOverride(text);
+        await postOverride(mrkdwnText);
         return;
       }
-      await thread.post(text);
+      await thread.post(mrkdwnText);
     },
     subscribe: () => thread.subscribe(),
   };
