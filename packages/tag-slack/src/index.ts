@@ -16,18 +16,33 @@ import { Chat, type Adapter, type StateAdapter } from "chat";
 import { createSlackAdapter } from "@chat-adapter/slack";
 
 import { wireBot, type TagBot } from "./wire.ts";
+import { createSlackFileLookup } from "./slack-files.ts";
 import { createSlackUserLookup } from "./slack-users.ts";
 import { defaultLogger, type Logger } from "./logger.ts";
 import type { TagDispatch } from "@corbits/tag-core";
 
 export { wireBot } from "./wire.ts";
 export type {
+  BotAttachment,
+  BotFile,
   BotHistoryMessage,
   BotMessage,
   BotSentMessage,
   BotThread,
   TagBot,
 } from "./wire.ts";
+export {
+  createSlackFileFetcher,
+  createSlackFileLookup,
+} from "./slack-files.ts";
+export type {
+  CreateSlackFileFetcherOptions,
+  CreateSlackFileLookupOptions,
+  SlackFileLookup,
+  SlackFileLookupResult,
+  SlackFileMetadata,
+  SlackFileFetcher,
+} from "./slack-files.ts";
 export { createSlackUserLookup } from "./slack-users.ts";
 export type {
   SlackUserLookup,
@@ -37,6 +52,7 @@ export type {
 export type { Logger } from "./logger.ts";
 export type {
   PriorTurn,
+  TagAttachment,
   TagAuthor,
   TagDispatch,
   TagEvent,
@@ -81,6 +97,11 @@ export type MountSlackTagOptions = TagDispatch & {
    * no bot token, will see `onThreadMessage` silently never fire.
    */
   userLookup?: import("./slack-users.ts").SlackUserLookup;
+  /**
+   * Resolves metadata for Slack file events that carry only an id. Defaults
+   * to `createSlackFileLookup(botToken)` when a bot token is available.
+   */
+  fileLookup?: import("./slack-files.ts").SlackFileLookup;
   /**
    * Fetch each thread's prior messages and attach them to `TagEvent.priorTurns`
    * (see `@corbits/tag-core`). Off by default. `refresh()` itself takes no
@@ -149,6 +170,16 @@ export function shouldAutoWireUserLookup(
   return Boolean(botToken) && !("userLookup" in options);
 }
 
+/** Same "explicit `undefined` disables it" contract as `shouldAutoWireUserLookup`, for `fileLookup`. */
+export function shouldAutoWireFileLookup(
+  options: {
+    fileLookup?: import("./slack-files.ts").SlackFileLookup | undefined;
+  },
+  botToken: string | undefined,
+): boolean {
+  return Boolean(botToken) && !("fileLookup" in options);
+}
+
 /** Mount the Slack tag webhook route and wire dispatch over one bot. */
 export function mountSlackTag(
   // deliberately typed against the default Hono env: the route lives
@@ -185,6 +216,9 @@ export function mountSlackTag(
     // — see `WireOptions.botToken`. Always the same token the adapter itself
     // authenticates with; hosts never configure this separately.
     ...(botToken !== undefined ? { botToken } : {}),
+    ...(shouldAutoWireFileLookup(options, botToken)
+      ? { fileLookup: createSlackFileLookup(botToken!, { logger }) }
+      : {}),
     ...(shouldAutoWireUserLookup(options, botToken)
       ? { userLookup: createSlackUserLookup(botToken!, { logger }) }
       : {}),

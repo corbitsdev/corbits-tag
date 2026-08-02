@@ -57,12 +57,51 @@ export type PriorTurn = {
   text: string;
   /** Whether this prior message was posted by the bot itself. */
   isBot: boolean;
+  /**
+   * Files attached to this prior message. Same normalization as
+   * `TagEvent.attachments` — the platform package never downloads; `url` is a
+   * platform-specific download URL that typically requires platform auth.
+   * `undefined` when there were none or the adapter did not look.
+   */
+  attachments?: readonly TagAttachment[];
+};
+
+/**
+ * A file attached to the message that produced a `TagEvent` (e.g. a Slack
+ * upload). The platform package normalizes whatever file metadata it has
+ * onto this shape; it does not download the file itself — `url`, when
+ * present, is a platform-specific download URL that typically requires the
+ * platform's own auth (e.g. Slack's `url_private_download` needs the bot
+ * token as a `Bearer` header) to actually fetch. Fetching and extracting
+ * text from the file is the host's job, not this package's.
+ */
+export type TagAttachment = {
+  /** Platform-unique file id (e.g. Slack file id). */
+  id: string;
+  /** Original filename, as uploaded. */
+  name: string;
+  /** MIME type reported by the platform (e.g. "application/pdf"). */
+  mimeType: string;
+  /** File size in bytes, when the platform reports it. */
+  size?: number;
+  /**
+   * Platform-specific download URL, when the platform exposes one. Slack:
+   * `url_private_download`, which requires an `Authorization: Bearer
+   * <bot token>` header to fetch — this package never calls it itself.
+   */
+  url?: string;
 };
 
 /** A normalized mention or thread message, independent of platform. */
 export type TagEvent = {
   /** Platform adapter name that produced the event (e.g. "slack"). */
   platform: string;
+  /**
+   * Platform message id when the adapter exposes one. Its uniqueness scope is
+   * platform-defined; hosts should pair it with `threadId` when deduplicating
+   * webhook retries.
+   */
+  messageId?: string;
   /** Platform-scoped thread identifier — stable correlation key for the conversation. */
   threadId: string;
   /** Message text with platform markup normalized to plain text/markdown. */
@@ -87,6 +126,13 @@ export type TagEvent = {
    * `undefined` when it wasn't asked to, empty when there simply is none.
    */
   priorTurns?: PriorTurn[];
+  /**
+   * Files attached to the message, when the platform package was able to
+   * normalize them and the message had any. `undefined` when the platform
+   * package doesn't support attachments or didn't look; empty/omitted when
+   * there simply were none.
+   */
+  attachments?: readonly TagAttachment[];
 };
 
 /**

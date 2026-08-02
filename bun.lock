@@ -27,6 +27,7 @@
       "dependencies": {
         "@chat-adapter/slack": "^4.34.0",
         "@corbits/tag-core": "workspace:*",
+        "arktype": "^2.2.3",
         "chat": "^4.34.0",
         "hono": "^4.12.31",
       },

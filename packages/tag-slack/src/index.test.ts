@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 
-import { mountSlackTag, shouldAutoWireUserLookup } from "./index.ts";
+import {
+  mountSlackTag,
+  shouldAutoWireFileLookup,
+  shouldAutoWireUserLookup,
+} from "./index.ts";
 
 // A structurally valid StateAdapter is heavy to fake; the mount test focuses
 // on the seams this package owns (option validation, route registration).
@@ -75,5 +79,28 @@ describe("shouldAutoWireUserLookup", () => {
     // so it silently re-enabled lookup anyway. `"userLookup" in options` is
     // true here (the key was set, just to `undefined`), so this must be false.
     expect(shouldAutoWireUserLookup({ userLookup: undefined }, "xoxb-test")).toBe(false);
+  });
+});
+
+describe("shouldAutoWireFileLookup", () => {
+  test("auto-wires when a bot token is present and fileLookup was never mentioned", () => {
+    expect(shouldAutoWireFileLookup({}, "xoxb-test")).toBe(true);
+  });
+
+  test("never auto-wires without a bot token", () => {
+    expect(shouldAutoWireFileLookup({}, undefined)).toBe(false);
+  });
+
+  test("a host-supplied fileLookup is never replaced by the auto-wired one", () => {
+    expect(
+      shouldAutoWireFileLookup(
+        { fileLookup: async () => ({ ok: false, reason: "unavailable" }) },
+        "xoxb-test",
+      ),
+    ).toBe(false);
+  });
+
+  test("fileLookup: undefined explicitly disables auto-wiring even with a bot token present", () => {
+    expect(shouldAutoWireFileLookup({ fileLookup: undefined }, "xoxb-test")).toBe(false);
   });
 });
