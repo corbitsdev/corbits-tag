@@ -10,6 +10,7 @@ import type {
   TagEvent,
   TagThread,
 } from "@corbits/tag-core";
+import { postSlackMessage } from "@chat-adapter/slack/api";
 import { defaultLogger, type Logger } from "./logger.ts";
 import { mdToMrkdwn } from "./mrkdwn.ts";
 import type {
@@ -168,6 +169,20 @@ export type WireOptions = TagDispatch & {
    * resolve it one way or another.
    */
   thinkingIndicatorErrorText?: string;
+  /**
+   * Bot token used ONLY for the Block Kit reply path: `BotThread.post()`
+   * (see above) is typed to take plain text — this package's own
+   * structural contract, kept narrow so tests can hand in a plain fake —
+   * so it cannot carry `TagThread.post()`'s optional `blocks`. When a host
+   * calls `post(text, { blocks })`, this package instead calls the Slack
+   * Web API's `chat.postMessage` directly (channel/thread_ts parsed from
+   * `thread.id`, which the Chat SDK Slack adapter formats as
+   * `${channelId}:${ts}`), passing `blocks` alongside `text` as the
+   * notification/fallback. Without a token, `blocks` is dropped with a
+   * warning and the plain `thread.post(text)` path is used instead — a
+   * missing token must never block answering.
+   */
+  botToken?: string;
 };
 
 const DEFAULT_MAX_HISTORY_MESSAGES = 50;
@@ -475,25 +490,139 @@ async function toEvent(
  * is still pending). Unifying into one placeholder-owned state machine is a
  * real improvement, but a separate refactor — not bundled into this fix.
  */
+/**
+ * Split the Chat SDK Slack thread id (`${channelId}:${ts}`, e.g.
+ * `"C1:1721800000.000100"`) into its parts. Returns `undefined` if `id`
+ * doesn't contain the separator — a malformed/foreign id must never be
+ * silently mistaken for a valid channel.
+ */
+function splitSlackThreadId(
+  id: string,
+): { channel: string; threadTs: string } | undefined {
+  const sep = id.indexOf(":");
+  if (sep <= 0 || sep === id.length - 1) return undefined;
+  return { channel: id.slice(0, sep), threadTs: id.slice(sep + 1) };
+}
+
+/**
+ * Post `text` + `blocks` as a genuinely new message, via the Slack Web API
+ * directly (`chat.postMessage`) rather than `thread.post()`: this package's
+ * own `BotThread.post()` contract (see above) is text-only, so it has no way
+ * to carry Block Kit blocks through. `text` is sent as Slack's
+ * notification/fallback text alongside `blocks`, per `TagThread.post`'s
+ * contract.
+ *
+ * Falls back to a plain `thread.post(text)` — dropping `blocks` — when there
+ * is no bot token or `thread.id` doesn't parse into `channel:ts`: a reply
+ * missing its rich formatting is far better than no reply at all.
+ */
+async function postBlockKitMessage(
+  thread: BotThread,
+  text: string,
+  blocks: unknown[],
+  botToken: string | undefined,
+  logger: Logger,
+  unfurl?: { unfurlLinks?: boolean; unfurlMedia?: boolean },
+): Promise<void> {
+  if (!botToken) {
+    logger.warn(
+      "tag-slack: post() was called with `blocks` but no bot token is " +
+        "configured for the Block Kit reply path — posting plain text " +
+        "instead. Set `botToken` (mountSlackTag reads SLACK_BOT_TOKEN by " +
+        "default) to enable it.",
+    );
+    await thread.post(text);
+    return;
+  }
+  const parsed = splitSlackThreadId(thread.id);
+  if (!parsed) {
+    logger.warn(
+      `tag-slack: post() was called with \`blocks\` but thread id ` +
+        `"${thread.id}" doesn't parse into a Slack channel:ts pair — ` +
+        `posting plain text instead.`,
+    );
+    await thread.post(text);
+    return;
+  }
+  await postSlackMessage({
+    token: botToken,
+    channel: parsed.channel,
+    threadTs: parsed.threadTs,
+    text,
+    // An empty array is the text-only unfurl-suppressed path — Slack rejects
+    // `blocks: []` alongside text, so omit the key entirely.
+    ...(blocks.length > 0 && { blocks }),
+    ...(unfurl ?? {}),
+  });
+}
+
 function toTagThread(
   thread: BotThread,
-  postOverride?: (text: string) => Promise<void>,
+  postOverride: ((text: string) => Promise<void>) | undefined,
+  botToken: string | undefined,
+  logger: Logger,
 ): TagThread {
   let overrideConsumed = false;
   return {
     id: thread.id,
-    post: async (text, options) => {
+    post: async (text, opts) => {
       // Normalize any markdown a host's dispatch produced (e.g. an LLM
       // answer) into Slack mrkdwn before it ever reaches Slack — see
       // `mdToMrkdwn`. Applied here so every caller of `TagThread.post()`
       // gets it automatically, without each host having to remember to.
       // Callers that already composed mrkdwn (or an intentional literal)
-      // can opt out with `{ convertMarkdown: false }`.
+      // can opt out with `{ convertMarkdown: false }`. Blocks (Block Kit)
+      // are host-authored JSON, already Slack-shaped — never passed through
+      // `mdToMrkdwn`.
       const mrkdwnText =
-        options?.convertMarkdown === false ? text : mdToMrkdwn(text);
+        opts?.convertMarkdown === false ? text : mdToMrkdwn(text);
       if (postOverride && !overrideConsumed) {
+        // The thinking-indicator placeholder edit only carries text — see
+        // `WireOptions.thinkingIndicator`, whose `sent.edit()` is a Chat SDK
+        // `SentMessage.edit(content: string)`. A `blocks` reply that lands on
+        // this very first `post()` call therefore can't be rendered into the
+        // placeholder; it's dropped here (the plain-text edit still happens)
+        // rather than silently posting a second, redundant Block Kit message
+        // alongside the placeholder.
         overrideConsumed = true;
         await postOverride(mrkdwnText);
+        return;
+      }
+      const unfurl =
+        opts?.unfurlLinks !== undefined || opts?.unfurlMedia !== undefined
+          ? {
+              ...(opts.unfurlLinks !== undefined && {
+                unfurlLinks: opts.unfurlLinks,
+              }),
+              ...(opts.unfurlMedia !== undefined && {
+                unfurlMedia: opts.unfurlMedia,
+              }),
+            }
+          : undefined;
+      if (opts?.blocks && opts.blocks.length > 0) {
+        await postBlockKitMessage(
+          thread,
+          mrkdwnText,
+          opts.blocks,
+          botToken,
+          logger,
+          unfurl,
+        );
+        return;
+      }
+      // The Chat SDK's `thread.post` has no unfurl surface, so a caller
+      // asking for suppression takes the same Web API path Block Kit
+      // replies use. Without a bot token there is nothing to suppress with
+      // — fall through to the plain SDK post.
+      if (unfurl !== undefined && botToken !== undefined) {
+        await postBlockKitMessage(
+          thread,
+          mrkdwnText,
+          [],
+          botToken,
+          logger,
+          unfurl,
+        );
         return;
       }
       await thread.post(mrkdwnText);
@@ -617,7 +746,7 @@ async function prepareDispatch(
   }
 
   return {
-    tagThread: toTagThread(thread, postOverride),
+    tagThread: toTagThread(thread, postOverride, options.botToken, logger),
     notifyFailure: notifyFailure ?? (async () => {}),
     resolveIfUnused: resolveIfUnused ?? (async () => {}),
   };

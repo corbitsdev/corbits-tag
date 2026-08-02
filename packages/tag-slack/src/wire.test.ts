@@ -1139,3 +1139,200 @@ describe("wireBot markdown normalization", () => {
     expect(posts).toEqual(["**not converted**"]);
   });
 });
+
+describe("wireBot Block Kit replies (TagThread.post blocks)", () => {
+  /** Captures the request body Slack's `chat.postMessage` would receive. */
+  function fakeSlackFetch() {
+    const calls: { url: string; body: URLSearchParams }[] = [];
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      calls.push({
+        url: String(url),
+        body: new URLSearchParams(String(init?.body ?? "")),
+      });
+      return new Response(JSON.stringify({ ok: true, ts: "123.456" }), {
+        status: 200,
+      });
+    }) as typeof fetch;
+    return { calls, fetchImpl };
+  }
+
+  test("blocks + a bot token → posts to chat.postMessage with text as fallback", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, posts } = fakeThread();
+    const { calls, fetchImpl } = fakeSlackFetch();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchImpl;
+    try {
+      wireBot(bot, {
+        botToken: "xoxb-test",
+        onTag: async (_event, tagThread) => {
+          await tagThread.post("Deal Brief: Modal", {
+            blocks: [{ type: "header", text: { type: "plain_text", text: "Modal" } }],
+          });
+        },
+      });
+
+      await handlers.mention!(thread, { text: "@scout brief", author: human });
+
+      // The Block Kit path bypasses `thread.post()` entirely — it calls
+      // Slack's `chat.postMessage` directly (see `postBlockKitMessage`).
+      expect(posts).toEqual([]);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.url).toBe("https://slack.com/api/chat.postMessage");
+      const body = calls[0]!.body;
+      expect(body.get("channel")).toBe("C1");
+      expect(body.get("thread_ts")).toBe("1721800000.000100");
+      expect(body.get("text")).toBe("Deal Brief: Modal");
+      expect(JSON.parse(body.get("blocks")!)).toEqual([
+        { type: "header", text: { type: "plain_text", text: "Modal" } },
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("unfurl suppression sends a text-only post through the Web API with the flags", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, posts } = fakeThread();
+    const { calls, fetchImpl } = fakeSlackFetch();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchImpl;
+    try {
+      wireBot(bot, {
+        botToken: "xoxb-test",
+        onTag: async (_event, tagThread) => {
+          await tagThread.post("no preview please https://example.com/x", {
+            unfurlLinks: false,
+            unfurlMedia: false,
+          });
+        },
+      });
+
+      await handlers.mention!(thread, { text: "@scout brief", author: human });
+
+      // The SDK's thread.post has no unfurl surface, so this takes the Web
+      // API path — text only, no `blocks` key.
+      expect(posts).toEqual([]);
+      expect(calls).toHaveLength(1);
+      const body = calls[0]!.body;
+      expect(body.get("text")).toBe("no preview please https://example.com/x");
+      expect(body.get("unfurl_links")).toBe("false");
+      expect(body.get("unfurl_media")).toBe("false");
+      expect(body.get("blocks")).toBeNull();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("unfurl flags ride along with Block Kit posts too", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const { calls, fetchImpl } = fakeSlackFetch();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchImpl;
+    try {
+      wireBot(bot, {
+        botToken: "xoxb-test",
+        onTag: async (_event, tagThread) => {
+          await tagThread.post("card", {
+            blocks: [{ type: "divider" }],
+            unfurlLinks: false,
+          });
+        },
+      });
+
+      await handlers.mention!(thread, { text: "@scout brief", author: human });
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.body.get("unfurl_links")).toBe("false");
+      expect(JSON.parse(calls[0]!.body.get("blocks")!)).toEqual([
+        { type: "divider" },
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("unfurl suppression without a bot token degrades to the plain SDK post", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, posts } = fakeThread();
+
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("plain", { unfurlLinks: false });
+      },
+    });
+
+    await handlers.mention!(thread, { text: "@scout brief", author: human });
+
+    expect(posts).toEqual(["plain"]);
+  });
+
+  test("blocks without a bot token falls back to plain thread.post(text), blocks dropped", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, posts } = fakeThread();
+
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("plain answer", {
+          blocks: [{ type: "header", text: { type: "plain_text", text: "Modal" } }],
+        });
+      },
+    });
+
+    await handlers.mention!(thread, { text: "@scout brief", author: human });
+
+    expect(posts).toEqual(["plain answer"]);
+  });
+
+  test("an empty blocks array behaves like a plain post — no Slack API call", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, posts } = fakeThread();
+    const { calls, fetchImpl } = fakeSlackFetch();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchImpl;
+    try {
+      wireBot(bot, {
+        botToken: "xoxb-test",
+        onTag: async (_event, tagThread) => {
+          await tagThread.post("plain answer", { blocks: [] });
+        },
+      });
+
+      await handlers.mention!(thread, { text: "@scout brief", author: human });
+
+      expect(posts).toEqual(["plain answer"]);
+      expect(calls).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("convertMarkdown: false protects the Block Kit fallback text too, not just the plain-post path", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const { calls, fetchImpl } = fakeSlackFetch();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchImpl;
+    try {
+      wireBot(bot, {
+        botToken: "xoxb-test",
+        onTag: async (_event, tagThread) => {
+          await tagThread.post("*already mrkdwn*", {
+            convertMarkdown: false,
+            blocks: [{ type: "divider" }],
+          });
+        },
+      });
+
+      await handlers.mention!(thread, { text: "@scout brief", author: human });
+
+      // Had the opt-out only guarded the plain-post path, this would have
+      // been re-run through `mdToMrkdwn` a second time on its way into the
+      // Block Kit fallback `text` field.
+      expect(calls[0]!.body.get("text")).toBe("*already mrkdwn*");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
