@@ -12,9 +12,15 @@
 
 export type Logger = {
   warn(message: string): void;
+  /**
+   * Diagnostic-only lines. Optional so existing host loggers keep working;
+   * when absent, debug lines are dropped.
+   */
+  debug?(message: string): void;
 };
 
-/** Default logger: `console.warn`, same behavior as before this seam existed. */
+/** Default logger: `console.warn`/`console.debug`, same routing as before this seam existed. */
 export const defaultLogger: Logger = {
   warn: (message) => console.warn(message),
+  debug: (message) => console.debug(message),
 };
