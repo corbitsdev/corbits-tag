@@ -1389,3 +1389,330 @@ describe("wireBot Block Kit replies (TagThread.post blocks)", () => {
     }
   });
 });
+
+describe("wireBot attachments", () => {
+  test("TagEvent.messageId carries the Chat SDK message id when present", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, { onTag: async (event) => void seen.push(event) });
+
+    await handlers.mention!(thread, {
+      id: "1700000000.000100",
+      text: "@scout status",
+      author: human,
+    });
+
+    expect(seen[0]?.messageId).toBe("1700000000.000100");
+  });
+
+  test("TagEvent.messageId is absent when the adapter supplies no id", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, { onTag: async (event) => void seen.push(event) });
+
+    await handlers.mention!(thread, { text: "@scout status", author: human });
+
+    expect(seen[0]).not.toHaveProperty("messageId");
+  });
+
+  test("mention with Chat SDK attachments → TagEvent.attachments, Slack id from raw.files", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => {
+        seen.push(event);
+      },
+    });
+
+    await handlers.mention!(thread, {
+      text: "@scout see attached",
+      author: human,
+      attachments: [
+        {
+          name: "deck.pdf",
+          mimeType: "application/pdf",
+          size: 1234,
+          url: "https://files.slack.com/files-pri/T1-F1/deck.pdf",
+        },
+        // No name/mime/size/url — mapper still produces a usable attachment
+        // with a stable synthetic id and a generic MIME type.
+        {},
+      ],
+      raw: {
+        type: "app_mention",
+        channel: "C123",
+        files: [
+          {
+            id: "F1",
+            name: "deck.pdf",
+            mimetype: "application/pdf",
+            url_private: "https://files.slack.com/files-pri/T1-F1/deck.pdf",
+          },
+        ],
+      },
+    });
+
+    expect(seen[0]?.attachments).toEqual([
+      {
+        id: "F1",
+        name: "deck.pdf",
+        mimeType: "application/pdf",
+        size: 1234,
+        url: "https://files.slack.com/files-pri/T1-F1/deck.pdf",
+      },
+      {
+        id: "attachment-1",
+        name: "attachment-1",
+        mimeType: "application/octet-stream",
+      },
+    ]);
+  });
+
+  test("attachments without raw.files use a stable synthetic id", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, { onTag: async (event) => void seen.push(event) });
+
+    await handlers.mention!(thread, {
+      text: "@scout deck",
+      author: human,
+      attachments: [
+        {
+          name: "pitch.pdf",
+          mimeType: "application/pdf",
+          size: 99,
+          url: "https://files.slack.com/files-pri/T1-F9/pitch.pdf",
+        },
+      ],
+    });
+
+    expect(seen[0]?.attachments).toEqual([
+      {
+        id: "https://files.slack.com/files-pri/T1-F9/pitch.pdf",
+        name: "pitch.pdf",
+        mimeType: "application/pdf",
+        size: 99,
+        url: "https://files.slack.com/files-pri/T1-F9/pitch.pdf",
+      },
+    ]);
+  });
+
+  test("raw Slack files replace Chat SDK placeholder metadata by index", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, { onTag: async (event) => void seen.push(event) });
+
+    await handlers.mention!(thread, {
+      text: "@scout review both",
+      author: human,
+      attachments: [
+        {
+          name: "attachment-0",
+          mimeType: "application/octet-stream",
+        },
+        {},
+      ],
+      raw: {
+        files: [
+          {
+            id: "F-PDF",
+            name: "scout-deck.pdf",
+            mimetype: "application/pdf",
+            size: 3_400_000,
+            url_private: "https://files.slack.com/files-pri/T1-F-PDF/preview",
+            url_private_download:
+              "https://files.slack.com/files-pri/T1-F-PDF/download/scout-deck.pdf",
+            private_metadata: "must not leak",
+          },
+          {
+            id: "F-TXT",
+            name: "notes.txt",
+            mimetype: "text/plain",
+            size: 42,
+            url_private: "https://files.slack.com/files-pri/T1-F-TXT/notes.txt",
+          },
+        ],
+      },
+    });
+
+    expect(seen[0]?.attachments).toEqual([
+      {
+        id: "F-PDF",
+        name: "scout-deck.pdf",
+        mimeType: "application/pdf",
+        size: 3_400_000,
+        url: "https://files.slack.com/files-pri/T1-F-PDF/download/scout-deck.pdf",
+      },
+      {
+        id: "F-TXT",
+        name: "notes.txt",
+        mimeType: "text/plain",
+        size: 42,
+        url: "https://files.slack.com/files-pri/T1-F-TXT/notes.txt",
+      },
+    ]);
+  });
+
+  test("files.info enriches the exact id-only Slack event shape before dispatch", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      fileLookup: async (fileId) => ({
+        ok: true,
+        file: {
+          id: fileId,
+          name: "scout-deck-2026-07-27.pptx.pdf",
+          mimeType: "application/pdf",
+          size: 3_400_000,
+          url: "https://files.slack.com/files-pri/T1-F0BLCLASS11/download",
+        },
+      }),
+      onTag: async (event) => void seen.push(event),
+    });
+
+    await handlers.mention!(thread, {
+      text: "@scout run DD on this",
+      author: human,
+      attachments: [{}],
+      raw: { files: [{ id: "F0BLCLASS11" }] },
+    });
+
+    expect(seen[0]?.attachments).toEqual([
+      {
+        id: "F0BLCLASS11",
+        name: "scout-deck-2026-07-27.pptx.pdf",
+        mimeType: "application/pdf",
+        size: 3_400_000,
+        url: "https://files.slack.com/files-pri/T1-F0BLCLASS11/download",
+      },
+    ]);
+  });
+
+  test("mention with no attachments leaves TagEvent.attachments undefined", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, { onTag: async (event) => void seen.push(event) });
+
+    await handlers.mention!(thread, { text: "hi", author: human });
+
+    expect(seen[0]?.attachments).toBeUndefined();
+  });
+
+  test("tolerates an opaque raw payload while normalizing attachments", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread();
+    const seen: TagEvent[] = [];
+    wireBot(bot, { onTag: async (event) => void seen.push(event) });
+
+    await handlers.mention!(thread, {
+      text: "@scout deck",
+      author: human,
+      raw: "opaque-adapter-payload",
+      attachments: [
+        {
+          name: "deck.pdf",
+          mimeType: "application/pdf",
+          url: "https://files.slack.com/deck.pdf",
+        },
+      ],
+    });
+
+    expect(seen[0]?.attachments).toEqual([
+      {
+        id: "https://files.slack.com/deck.pdf",
+        name: "deck.pdf",
+        mimeType: "application/pdf",
+        url: "https://files.slack.com/deck.pdf",
+      },
+    ]);
+  });
+
+  test("maps files on prior history messages onto PriorTurn.attachments", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread(undefined, {
+      messages: [
+        {
+          text: "here's the deck",
+          author: { userId: "U123", isMe: false },
+          attachments: [
+            {
+              name: "Aerolane Memo.pdf",
+              mimeType: "application/pdf",
+              size: 1024,
+              url: "https://files.slack.com/files-pri/T1/F_PRIOR/download/Aerolane_Memo.pdf",
+            },
+          ],
+          raw: {
+            files: [
+              {
+                id: "F_PRIOR",
+                name: "Aerolane Memo.pdf",
+                url_private:
+                  "https://files.slack.com/files-pri/T1/F_PRIOR/download/Aerolane_Memo.pdf",
+              },
+            ],
+          },
+        },
+        { text: "run DD on this memo", author: { userId: "U123", isMe: false } },
+      ],
+    });
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => void seen.push(event),
+      threadHistory: {},
+    });
+
+    await handlers.mention!(thread, {
+      text: "run DD on this memo",
+      author: human,
+    });
+
+    expect(seen[0]!.priorTurns).toEqual([
+      {
+        authorId: "U123",
+        text: "here's the deck",
+        isBot: false,
+        attachments: [
+          {
+            id: "F_PRIOR",
+            name: "Aerolane Memo.pdf",
+            mimeType: "application/pdf",
+            size: 1024,
+            url: "https://files.slack.com/files-pri/T1/F_PRIOR/download/Aerolane_Memo.pdf",
+          },
+        ],
+      },
+    ]);
+    // Current message had no files — TagEvent.attachments stays absent.
+    expect(seen[0]!.attachments).toBeUndefined();
+  });
+
+  test("prior turns without files leave PriorTurn.attachments undefined", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread } = fakeThread(undefined, {
+      messages: [
+        { text: "no files here", author: { userId: "U123", isMe: false } },
+        { text: "current", author: { userId: "U123", isMe: false } },
+      ],
+    });
+    const seen: TagEvent[] = [];
+    wireBot(bot, {
+      onTag: async (event) => void seen.push(event),
+      threadHistory: {},
+    });
+
+    await handlers.mention!(thread, { text: "current", author: human });
+
+    expect(seen[0]!.priorTurns).toEqual([
+      { authorId: "U123", text: "no files here", isBot: false },
+    ]);
+    expect(seen[0]!.priorTurns?.[0]).not.toHaveProperty("attachments");
+  });
+});

@@ -6,6 +6,7 @@
  */
 export type {
   PriorTurn,
+  TagAttachment,
   TagAuthor,
   TagDispatch,
   TagEvent,

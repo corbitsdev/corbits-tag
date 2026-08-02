@@ -3,8 +3,11 @@
  * Slack adapter: tests hand in a structural `TagBot` fake, simulate a
  * mention, and assert the normalized dispatch.
  */
+import "./arktype.ts";
+import { type } from "arktype";
 import type {
   PriorTurn,
+  TagAttachment,
   TagAuthor,
   TagDispatch,
   TagEvent,
@@ -14,6 +17,7 @@ import { postSlackMessage } from "@chat-adapter/slack/api";
 import { defaultLogger, type Logger } from "./logger.ts";
 import { mdToMrkdwn } from "./mrkdwn.ts";
 import { detectInfraErrorReply, sanitizeOutgoingText } from "./sanitize.ts";
+import type { SlackFileLookup } from "./slack-files.ts";
 import type {
   SlackUserLookup,
   SlackUserProfile,
@@ -29,6 +33,19 @@ export type BotHistoryMessage = {
    * `recentMessages` — see `fetchPriorTurns`.
    */
   id?: string;
+  /**
+   * Files on this prior message, normalized by the Chat SDK onto
+   * `message.attachments`. Same shape as `BotMessage.attachments`. Absent
+   * when the message had none or the adapter did not surface them.
+   */
+  attachments?: BotAttachment[];
+  /**
+   * Original platform event, when present on a history message. Same role as
+   * `BotMessage.raw` — recover Slack file ids onto `TagAttachment.id`. Typed
+   * as `unknown` because Chat SDK keeps `Message.raw` as the platform payload
+   * without a structural guarantee; `rawSlackFiles` narrows it at use sites.
+   */
+  raw?: unknown;
 };
 
 /** A message wrapped with edit/react/delete capabilities (Chat SDK's `SentMessage`). */
@@ -64,6 +81,58 @@ export type BotThread = {
 };
 
 /**
+ * One file on a Chat SDK `Message`, as the Slack adapter normalizes it onto
+ * `message.attachments` (name, mimeType, url from Slack's `url_private`).
+ * Private URLs need `Authorization: Bearer <bot token>` — this package never
+ * downloads; see `TagAttachment.url`.
+ */
+export type BotAttachment = {
+  name?: string;
+  mimeType?: string;
+  size?: number;
+  url?: string;
+  type?: string;
+  fetchMetadata?: Record<string, string>;
+};
+
+/**
+ * @deprecated Prefer `BotAttachment` — Chat SDK puts files on
+ * `message.attachments`, not Slack's raw `message.files`. Alias kept so
+ * existing `BotFile` imports keep typechecking.
+ */
+export type BotFile = BotAttachment;
+
+/**
+ * Slack's raw file entry as it still appears on the original event the Chat
+ * SDK keeps at `message.raw`. Used to recover metadata omitted from the
+ * normalized attachment object.
+ */
+type SlackRawFile = {
+  id?: string;
+  name?: string;
+  mimetype?: string;
+  size?: number;
+  url_private?: string;
+  url_private_download?: string;
+};
+
+const SlackRawPayload = type({
+  "files?": type({
+    "id?": "string",
+    "name?": "string",
+    "mimetype?": "string",
+    "size?": "number",
+    "url_private?": "string",
+    "url_private_download?": "string",
+  }).array(),
+}).or("undefined");
+
+function rawSlackFiles(raw: unknown): SlackRawFile[] | undefined {
+  const parsed = SlackRawPayload(raw);
+  return parsed instanceof type.errors ? undefined : parsed?.files;
+}
+
+/**
  * The slice of a Chat SDK message this package relies on (structural). The
  * Chat SDK's author carries no identity fields — email, emailVerified and
  * isRestricted are populated separately via `userLookup`.
@@ -74,7 +143,106 @@ export type BotMessage = {
   isMention?: boolean;
   /** Stable message id (Chat SDK's `Message.id`), when available. See `BotHistoryMessage.id`. */
   id?: string;
+  /**
+   * Files attached to the message, normalized by the Chat SDK onto
+   * `message.attachments`. `undefined` when there were none, or the adapter
+   * in use doesn't surface them at all.
+   */
+  attachments?: BotAttachment[];
+  /**
+   * Original platform event. The Slack adapter sets this to the raw Slack
+   * event, which still has `files` with Slack file ids — used only to recover
+   * those ids onto `TagAttachment.id`.
+   */
+  raw?: unknown;
 };
+
+/**
+ * Match the normalized Chat SDK attachment to Slack's raw file metadata.
+ * URL and name are stronger matches; index covers SDK attachments whose
+ * useful fields were omitted.
+ */
+function resolveRawFile(
+  attachment: BotAttachment,
+  rawFiles: readonly SlackRawFile[] | undefined,
+  index: number,
+): SlackRawFile | undefined {
+  if (rawFiles === undefined) return undefined;
+
+  const byUrl =
+    attachment.url !== undefined
+      ? rawFiles.find(
+          (file) =>
+            file.url_private === attachment.url ||
+            file.url_private_download === attachment.url,
+        )
+      : undefined;
+  if (byUrl !== undefined) return byUrl;
+
+  const byName =
+    attachment.name !== undefined
+      ? rawFiles.find((file) => file.name === attachment.name)
+      : undefined;
+  return byName ?? rawFiles[index];
+}
+
+/**
+ * Prefer Slack's file id. Fall back to stable attachment metadata so hosts
+ * can still key artifacts without a random per-turn value.
+ */
+function resolveAttachmentId(
+  attachment: BotAttachment,
+  rawFile: SlackRawFile | undefined,
+  index: number,
+): string {
+  if (rawFile?.id !== undefined && rawFile.id !== "") return rawFile.id;
+  if (attachment.url !== undefined && attachment.url !== "") {
+    return attachment.url;
+  }
+  if (attachment.name !== undefined && attachment.name !== "") {
+    return attachment.size !== undefined
+      ? `${attachment.name}:${attachment.size}`
+      : attachment.name;
+  }
+  return `attachment-${index}`;
+}
+
+/** Maps one Chat SDK attachment to the platform-agnostic `TagAttachment`. */
+function toAttachment(
+  attachment: BotAttachment,
+  rawFiles: readonly SlackRawFile[] | undefined,
+  index: number,
+): TagAttachment {
+  const rawFile = resolveRawFile(attachment, rawFiles, index);
+  const generatedName = `attachment-${index}`;
+  const name =
+    attachment.name && attachment.name !== generatedName
+      ? attachment.name
+      : rawFile?.name || attachment.name;
+  const mimeType =
+    attachment.mimeType && attachment.mimeType !== "application/octet-stream"
+      ? attachment.mimeType
+      : rawFile?.mimetype || attachment.mimeType;
+  const size = attachment.size ?? rawFile?.size;
+  const url = attachment.url || rawFile?.url_private_download || rawFile?.url_private;
+  const id = resolveAttachmentId(
+    {
+      ...attachment,
+      ...(name !== undefined ? { name } : {}),
+      ...(size !== undefined ? { size } : {}),
+      ...(url !== undefined ? { url } : {}),
+    },
+    rawFile,
+    index,
+  );
+  return {
+    id,
+    name: name ?? id,
+    mimeType: mimeType ?? "application/octet-stream",
+    ...(size !== undefined ? { size } : {}),
+    ...(url !== undefined ? { url } : {}),
+  };
+}
 
 /** The slice of the Chat SDK bot this package relies on (structural). */
 export type TagBot = {
@@ -184,6 +352,11 @@ export type WireOptions = TagDispatch & {
    * missing token must never block answering.
    */
   botToken?: string;
+  /**
+   * Resolves metadata for Slack events that contain only a file id. The
+   * package mount auto-wires `createSlackFileLookup` when a bot token exists.
+   */
+  fileLookup?: SlackFileLookup;
 };
 
 const DEFAULT_MAX_HISTORY_MESSAGES = 50;
@@ -391,11 +564,21 @@ async function fetchPriorTurns(
         last.text === current.text && last.author.userId === current.author.userId);
   const prior = isCurrent ? messages.slice(0, -1) : messages;
 
-  return prior.slice(-maxMessages).map((m) => ({
-    authorId: m.author.userId,
-    text: m.text,
-    isBot: m.author.isMe,
-  }));
+  return prior.slice(-maxMessages).map((m) => {
+    const historyRawFiles = rawSlackFiles(m.raw);
+    const attachments =
+      m.attachments && m.attachments.length > 0
+        ? m.attachments.map((attachment, index) =>
+            toAttachment(attachment, historyRawFiles, index),
+          )
+        : undefined;
+    return {
+      authorId: m.author.userId,
+      text: m.text,
+      isBot: m.author.isMe,
+      ...(attachments !== undefined ? { attachments } : {}),
+    };
+  });
 }
 
 /**
@@ -436,6 +619,7 @@ async function toEvent(
    * never a value in need of re-checking here.
    */
   maxMessages: number | undefined,
+  fileLookup: SlackFileLookup | undefined,
   logger: Logger,
 ): Promise<TagEvent> {
   const { userId, userName, fullName, isBot } = message.author;
@@ -461,14 +645,77 @@ async function toEvent(
     maxMessages !== undefined
       ? await fetchPriorTurns(thread, message, maxMessages, logger)
       : undefined;
+  const rawFiles = rawSlackFiles(message.raw);
+  const attachments =
+    message.attachments && message.attachments.length > 0
+      ? await Promise.all(
+          message.attachments.map(async (attachment, index) => {
+            const normalized = toAttachment(attachment, rawFiles, index);
+            const rawFile = resolveRawFile(attachment, rawFiles, index);
+            const needsLookup =
+              normalized.name === normalized.id ||
+              normalized.name === `attachment-${index}` ||
+              normalized.mimeType === "application/octet-stream" ||
+              normalized.url === undefined;
+            if (
+              !needsLookup ||
+              fileLookup === undefined ||
+              rawFile?.id === undefined ||
+              rawFile.id === ""
+            ) {
+              return normalized;
+            }
+
+            try {
+              const result = await fileLookup(rawFile.id);
+              if (!result.ok) return normalized;
+              const file = result.file;
+              const placeholderName =
+                normalized.name === normalized.id ||
+                normalized.name === `attachment-${index}`;
+              return {
+                id: normalized.id,
+                name:
+                  placeholderName && file.name !== undefined
+                    ? file.name
+                    : normalized.name,
+                mimeType:
+                  normalized.mimeType === "application/octet-stream" &&
+                  file.mimeType !== undefined
+                    ? file.mimeType
+                    : normalized.mimeType,
+                ...(normalized.size !== undefined
+                  ? { size: normalized.size }
+                  : file.size !== undefined
+                    ? { size: file.size }
+                    : {}),
+                ...(normalized.url !== undefined
+                  ? { url: normalized.url }
+                  : file.url !== undefined
+                    ? { url: file.url }
+                    : {}),
+              };
+            } catch (cause) {
+              logger.warn(
+                `tag-slack: file metadata lookup failed for ${rawFile.id}: ${
+                  cause instanceof Error ? cause.message : String(cause)
+                }`,
+              );
+              return normalized;
+            }
+          }),
+        )
+      : undefined;
   return {
     platform: "slack",
+    ...(message.id !== undefined ? { messageId: message.id } : {}),
     threadId: thread.id,
     text: message.text,
     author,
     isMention,
     trigger: isMention ? "mention" : "ambient",
     ...(priorTurns !== undefined ? { priorTurns } : {}),
+    ...(attachments !== undefined ? { attachments } : {}),
   };
 }
 
@@ -810,6 +1057,7 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
       true,
       options.userLookup,
       maxHistoryMessages,
+      options.fileLookup,
       logger,
     );
     const { tagThread, notifyFailure, resolveIfUnused } = await prepareDispatch(
@@ -839,6 +1087,7 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
         true,
         options.userLookup,
         maxHistoryMessages,
+        options.fileLookup,
         logger,
       );
       const { tagThread, notifyFailure, resolveIfUnused } = await prepareDispatch(
@@ -877,6 +1126,7 @@ export function wireBot(bot: TagBot, options: WireOptions): void {
         false,
         options.userLookup,
         maxHistoryMessages,
+        options.fileLookup,
         logger,
       );
       if (event.author.isBot !== false) return;
