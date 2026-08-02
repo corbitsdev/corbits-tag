@@ -1124,4 +1124,18 @@ describe("wireBot markdown normalization", () => {
 
     expect(events).toContain("edit:*Result*\n• done");
   });
+
+  test("tagThread.post(text, { convertMarkdown: false }) skips mrkdwn conversion", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, posts } = fakeThread();
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("**not converted**", { convertMarkdown: false });
+      },
+    });
+
+    await handlers.mention!(thread, { text: "@scout status?", author: human });
+
+    expect(posts).toEqual(["**not converted**"]);
+  });
 });

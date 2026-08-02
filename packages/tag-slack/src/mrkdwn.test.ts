@@ -13,6 +13,23 @@ describe("mdToMrkdwn", () => {
     );
   });
 
+  test("leaves image markdown untouched instead of corrupting it into a link", () => {
+    const input = "![a diagram](https://example.com/diagram.png)";
+    expect(mdToMrkdwn(input)).toBe(input);
+  });
+
+  test("converts a normal link adjacent to an untouched image", () => {
+    const input =
+      "![a diagram](https://example.com/diagram.png) see [the docs](https://example.com/docs)";
+    expect(mdToMrkdwn(input)).toBe(
+      "![a diagram](https://example.com/diagram.png) see <https://example.com/docs|the docs>",
+    );
+  });
+
+  test("converts double-tilde strikethrough to single-tilde", () => {
+    expect(mdToMrkdwn("This is ~~wrong~~ right")).toBe("This is ~wrong~ right");
+  });
+
   test("converts leading header lines to bold plain lines", () => {
     expect(mdToMrkdwn("# Title")).toBe("*Title*");
     expect(mdToMrkdwn("## Subtitle\nbody text")).toBe("*Subtitle*\nbody text");
@@ -60,13 +77,9 @@ describe("mdToMrkdwn", () => {
   });
 
   test("does not corrupt literal text that happens to look like an internal placeholder", () => {
-    // Regression: the restore pass finds placeholders by matching
-    // NUL-delimited `MRKDWN_(FENCE|CODE)_<n>` tokens. NUL can't appear in
-    // ordinary text, so there's no collision surface — but a delimiter that
-    // *can* appear in ordinary text (e.g. a plain space) would let restore()
-    // rewrite text it never protected. A model asked to repeat something
-    // verbatim, quote a debug dump, or echo a log line can plausibly
-    // produce a string that looks like an unprotected placeholder.
+    // Regression: text that merely *looks* like a placeholder (no NUL
+    // delimiter) must not be touched by restore(). See the NUL-delimiter
+    // rationale on the placeholder constants in mrkdwn.ts.
     const input =
       "Here is code: `x = 1` and also this literal text: MRKDWN_CODE_0 (not code)";
     expect(mdToMrkdwn(input)).toBe(

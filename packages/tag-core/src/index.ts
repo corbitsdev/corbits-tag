@@ -10,4 +10,5 @@ export type {
   TagDispatch,
   TagEvent,
   TagThread,
+  TagThreadPostOptions,
 } from "./types.ts";
