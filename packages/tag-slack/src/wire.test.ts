@@ -1140,6 +1140,59 @@ describe("wireBot markdown normalization", () => {
   });
 });
 
+describe("wireBot outgoing text sanitization", () => {
+  test("strips a wrapping HTML tag before mrkdwn conversion", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, posts } = fakeThread();
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post('<div dir="auto">**status**: done</div>');
+      },
+    });
+
+    await handlers.mention!(thread, { text: "@scout status?", author: human });
+
+    expect(posts).toEqual(["*status*: done"]);
+  });
+
+  test("swaps a raw infra-error dump for a neutral message and logs the original", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, posts } = fakeThread();
+    const warnings: string[] = [];
+    wireBot(bot, {
+      logger: { warn: (m) => warnings.push(m) },
+      onTag: async (_event, tagThread) => {
+        await tagThread.post(
+          "This agent could not complete your request due to an unrecoverable inference error [HTTP 400]: invalid message content type: <nil>",
+        );
+      },
+    });
+
+    await handlers.mention!(thread, { text: "@scout status?", author: human });
+
+    expect(posts).toEqual([
+      "I hit an infrastructure error on that one — tag me to retry.",
+    ]);
+    expect(warnings.some((m) => m.includes("infra-error pattern"))).toBe(true);
+  });
+
+  test("sanitization still runs when convertMarkdown is false", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, posts } = fakeThread();
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post('<div dir="auto">*already mrkdwn*</div>', {
+          convertMarkdown: false,
+        });
+      },
+    });
+
+    await handlers.mention!(thread, { text: "@scout status?", author: human });
+
+    expect(posts).toEqual(["*already mrkdwn*"]);
+  });
+});
+
 describe("wireBot Block Kit replies (TagThread.post blocks)", () => {
   /** Captures the request body Slack's `chat.postMessage` would receive. */
   function fakeSlackFetch() {

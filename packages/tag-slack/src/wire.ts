@@ -13,6 +13,7 @@ import type {
 import { postSlackMessage } from "@chat-adapter/slack/api";
 import { defaultLogger, type Logger } from "./logger.ts";
 import { mdToMrkdwn } from "./mrkdwn.ts";
+import { detectInfraErrorReply, sanitizeOutgoingText } from "./sanitize.ts";
 import type {
   SlackUserLookup,
   SlackUserProfile,
@@ -491,6 +492,33 @@ async function toEvent(
  * real improvement, but a separate refactor — not bundled into this fix.
  */
 /**
+ * Replaces a raw infra-error dump (see `detectInfraErrorReply`) with this
+ * neutral, user-actionable message rather than exposing internals like
+ * "[HTTP 400]" or "unrecoverable inference error" to a Slack channel.
+ */
+const INFRA_ERROR_REPLY_TEXT =
+  "I hit an infrastructure error on that one — tag me to retry.";
+
+/**
+ * Runs `sanitizeOutgoingText` on every outgoing reply (stripping HTML
+ * wrapper tags, stray JSON/fence artifacts, and markdown escape noise — see
+ * `sanitize.ts`), then swaps in a neutral message for a raw infra-error dump
+ * so it never reaches Slack verbatim. The original text is logged (not
+ * dropped) so the failure is still diagnosable.
+ */
+function resolveOutgoingText(text: string, logger: Logger): string {
+  const sanitized = sanitizeOutgoingText(text);
+  if (detectInfraErrorReply(sanitized)) {
+    logger.warn(
+      `tag-slack: outgoing reply matched an infra-error pattern; replacing ` +
+        `it with a generic message before posting. Original: ${sanitized}`,
+    );
+    return INFRA_ERROR_REPLY_TEXT;
+  }
+  return sanitized;
+}
+
+/**
  * Split the Chat SDK Slack thread id (`${channelId}:${ts}`, e.g.
  * `"C1:1721800000.000100"`) into its parts. Returns `undefined` if `id`
  * doesn't contain the separator — a malformed/foreign id must never be
@@ -566,6 +594,14 @@ function toTagThread(
   return {
     id: thread.id,
     post: async (text, opts) => {
+      // Clean up known model-output artifacts (HTML wrapper tags, leaked
+      // JSON/tool-call fences, escape noise, raw infra-error dumps — see
+      // `sanitize.ts`) before anything else. This runs unconditionally,
+      // regardless of `convertMarkdown`: it targets text that should never
+      // have reached Slack in that shape at all, not markdown that needs
+      // converting, so opting out of markdown conversion is not a reason to
+      // skip it.
+      const sanitizedText = resolveOutgoingText(text, logger);
       // Normalize any markdown a host's dispatch produced (e.g. an LLM
       // answer) into Slack mrkdwn before it ever reaches Slack — see
       // `mdToMrkdwn`. Applied here so every caller of `TagThread.post()`
@@ -575,7 +611,7 @@ function toTagThread(
       // are host-authored JSON, already Slack-shaped — never passed through
       // `mdToMrkdwn`.
       const mrkdwnText =
-        opts?.convertMarkdown === false ? text : mdToMrkdwn(text);
+        opts?.convertMarkdown === false ? sanitizedText : mdToMrkdwn(sanitizedText);
       if (postOverride && !overrideConsumed) {
         // The thinking-indicator placeholder edit only carries text — see
         // `WireOptions.thinkingIndicator`, whose `sent.edit()` is a Chat SDK
