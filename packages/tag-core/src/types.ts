@@ -90,6 +90,26 @@ export type TagEvent = {
 };
 
 /**
+ * Optional per-post options for `TagThread.post()`.
+ *
+ * This is a transport-contract type, not a Slack-specific one: any platform
+ * package implementing `TagThread` is expected to honor it, even though
+ * `@corbits/tag-slack` is the only implementation today. A platform package
+ * without native markdown (or with its own conversion story) still owns
+ * `convertMarkdown`'s meaning for that platform — it just may be a no-op.
+ */
+export type TagThreadPostOptions = {
+  /**
+   * Whether the platform package should convert `text` from markdown to the
+   * platform's native formatting before posting. Default `true`. Set `false`
+   * when the caller already composed platform-native text (or an
+   * intentional literal) and markdown conversion would corrupt it — the
+   * caller is the only one who knows which case it is.
+   */
+  convertMarkdown?: boolean;
+};
+
+/**
  * The reply surface for one thread. Deliberately minimal: post a reply,
  * subscribe to future messages. Platform packages may expose a richer raw
  * handle alongside it, but dispatch logic written against this type stays
@@ -98,8 +118,12 @@ export type TagEvent = {
 export type TagThread = {
   /** Stable thread identifier — matches `TagEvent.threadId`. */
   id: string;
-  /** Post a message into the thread (markdown; platform package converts). */
-  post(text: string): Promise<void>;
+  /**
+   * Post a message into the thread (markdown; platform package converts).
+   * Accepts optional per-post `TagThreadPostOptions` — see its doc comment
+   * for the conversion contract.
+   */
+  post(text: string, options?: TagThreadPostOptions): Promise<void>;
   /** Subscribe the bot to every future message in this thread. */
   subscribe(): Promise<void>;
 };

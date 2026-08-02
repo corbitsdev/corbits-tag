@@ -1094,3 +1094,48 @@ describe("wireBot ambient bot-guard", () => {
     expect(calls).toBe(1);
   });
 });
+
+describe("wireBot markdown normalization", () => {
+  test("tagThread.post() converts markdown to Slack mrkdwn before posting", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, posts } = fakeThread();
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("**bold** and [a link](https://example.com)");
+      },
+    });
+
+    await handlers.mention!(thread, { text: "@scout status?", author: human });
+
+    expect(posts).toEqual(["*bold* and <https://example.com|a link>"]);
+  });
+
+  test("a thinking-indicator placeholder edit also receives mrkdwn-converted text", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, events } = fakeEditableThread();
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("# Result\n- done");
+      },
+      thinkingIndicator: true,
+    });
+
+    await handlers.mention!(thread, { text: "@scout status?", author: human });
+
+    expect(events).toContain("edit:*Result*\n• done");
+  });
+
+  test("tagThread.post(text, { convertMarkdown: false }) skips mrkdwn conversion", async () => {
+    const { bot, handlers } = fakeBot();
+    const { thread, posts } = fakeThread();
+    wireBot(bot, {
+      onTag: async (_event, tagThread) => {
+        await tagThread.post("**not converted**", { convertMarkdown: false });
+      },
+    });
+
+    await handlers.mention!(thread, { text: "@scout status?", author: human });
+
+    expect(posts).toEqual(["**not converted**"]);
+  });
+});

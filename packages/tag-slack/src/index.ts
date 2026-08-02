@@ -41,7 +41,10 @@ export type {
   TagDispatch,
   TagEvent,
   TagThread,
+  TagThreadPostOptions,
 } from "@corbits/tag-core";
+
+export { mdToMrkdwn } from "./mrkdwn.ts";
 
 export type MountSlackTagOptions = TagDispatch & {
   /** Bot username, shown by the platform (Chat SDK `userName`). */
