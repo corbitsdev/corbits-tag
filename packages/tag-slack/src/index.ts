@@ -181,6 +181,10 @@ export function mountSlackTag(
   wireBot(bot, {
     ...options,
     logger,
+    // Enables the Block Kit reply path (`TagThread.post(text, { blocks })`)
+    // — see `WireOptions.botToken`. Always the same token the adapter itself
+    // authenticates with; hosts never configure this separately.
+    ...(botToken !== undefined ? { botToken } : {}),
     ...(shouldAutoWireUserLookup(options, botToken)
       ? { userLookup: createSlackUserLookup(botToken!, { logger }) }
       : {}),
