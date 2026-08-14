@@ -1,9 +1,9 @@
 /**
- * @corbits/tag-slack — mountable Slack tag ingress for Interchange hubs.
+ * corbits-tag/slack — mountable Slack tag ingress for Interchange hubs.
  *
  * `mountSlackTag(app, opts)` adds one webhook route to the host's Hono app
  * and routes Slack mentions/thread messages to the host's dispatch as
- * normalized `TagEvent`s (see `@corbits/tag-core`).
+ * normalized `TagEvent`s (see `corbits-tag/core`).
  *
  * Security posture: this route mounts OUTSIDE the host's session auth —
  * Slack is not a principal. The Chat SDK Slack adapter verifies the request
@@ -19,7 +19,7 @@ import { wireBot, type TagBot } from "./wire.ts";
 import { createSlackFileLookup } from "./slack-files.ts";
 import { createSlackUserLookup } from "./slack-users.ts";
 import { defaultLogger, type Logger } from "./logger.ts";
-import type { TagDispatch } from "@corbits/tag-core";
+import type { TagDispatch } from "../core/types.ts";
 
 export { wireBot } from "./wire.ts";
 export type {
@@ -58,7 +58,7 @@ export type {
   TagEvent,
   TagThread,
   TagThreadPostOptions,
-} from "@corbits/tag-core";
+} from "../core/types.ts";
 
 export { mdToMrkdwn } from "./mrkdwn.ts";
 
@@ -104,7 +104,7 @@ export type MountSlackTagOptions = TagDispatch & {
   fileLookup?: import("./slack-files.ts").SlackFileLookup;
   /**
    * Fetch each thread's prior messages and attach them to `TagEvent.priorTurns`
-   * (see `@corbits/tag-core`). Off by default. `refresh()` itself takes no
+   * (see `corbits-tag/core`). Off by default. `refresh()` itself takes no
    * range argument — it re-fetches whatever the Chat SDK's own history
    * cache holds; `maxMessages` bounds how many of *those* messages this
    * mechanism keeps (default 50), by slicing after the fact, not the raw
