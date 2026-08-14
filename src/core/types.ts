@@ -2,7 +2,7 @@
  * Transport-agnostic contracts for the Corbits Tag ingress.
  *
  * A "tag" is a mention of the bot in a thread on some chat platform. The
- * platform package (e.g. `@corbits/tag-slack`) normalizes the platform event
+ * platform package (e.g. `corbits-tag/slack`) normalizes the platform event
  * into a `TagEvent` and hands it to the host's dispatch alongside a
  * `TagThread` reply surface. The host decides what a tag means — this layer
  * never dispatches work itself.
@@ -122,7 +122,7 @@ export type TagEvent = {
   /**
    * Prior messages in this thread, oldest-first, not including the current
    * message. Populated only when the platform package was asked to fetch
-   * thread history (see e.g. `@corbits/tag-slack`'s `threadHistory` option);
+   * thread history (see e.g. `corbits-tag/slack`'s `threadHistory` option);
    * `undefined` when it wasn't asked to, empty when there simply is none.
    */
   priorTurns?: PriorTurn[];
@@ -140,7 +140,7 @@ export type TagEvent = {
  *
  * This is a transport-contract type, not a Slack-specific one: any platform
  * package implementing `TagThread` is expected to honor it, even though
- * `@corbits/tag-slack` is the only implementation today. A platform package
+ * `corbits-tag/slack` is the only implementation today. A platform package
  * without native markdown (or with its own conversion story) still owns
  * `convertMarkdown`'s meaning for that platform — it just may be a no-op.
  */

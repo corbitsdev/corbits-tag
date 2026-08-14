@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import type { TagEvent } from "@corbits/tag-core";
+import type { TagEvent } from "../core/types.ts";
 import {
   wireBot,
   type BotHistoryMessage,

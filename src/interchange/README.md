@@ -1,7 +1,7 @@
-# @corbits/tag-interchange
+# corbits-tag/interchange
 
 Binds a chat author to an Interchange principal by email. This is the piece
-that lets a mountable tag package (e.g. `@corbits/tag-slack`) answer as a
+that lets a mountable tag package (e.g. `corbits-tag/slack`) answer as a
 specific, real Interchange identity instead of trusting whatever a platform
 event claims.
 
@@ -19,7 +19,7 @@ Two halves:
 ## Resolving
 
 ```ts
-import { createPrincipalResolver } from "@corbits/tag-interchange";
+import { createPrincipalResolver } from "corbits-tag/interchange";
 
 const resolve = createPrincipalResolver({ db, tenantSlug: "acme" });
 
@@ -41,7 +41,7 @@ type AuthorIdentity = {
 };
 ```
 
-This is deliberately **not** `@corbits/tag-core`'s `TagAuthor` yet — main still
+This is deliberately **not** `corbits-tag/core`'s `TagAuthor` yet — main still
 lacks `email` / `isRestricted` (tracked in
 [CL-4510](https://linear.app/abklabs/issue/CL-4510)). Once those land with the
 same unions, a host can pass a `TagAuthor` through after any remaining
@@ -102,7 +102,7 @@ should be provisioned, refused, or escalated — is left entirely to the host.
 ## Provisioning
 
 ```ts
-import { provisionPrincipal } from "@corbits/tag-interchange";
+import { provisionPrincipal } from "corbits-tag/interchange";
 
 const principal = await provisionPrincipal(db, {
   tenantId,

@@ -18,7 +18,7 @@ Slack ──POST /api/tag/slack/webhook──▶ host Hono app
                               host dispatch (onTag / onThreadMessage)
                                           │ optional
                                           ▼
-                         @corbits/tag-interchange createPrincipalResolver
+                         corbits-tag/interchange createPrincipalResolver
                          email → real principal, or provisionPrincipal
 ```
 
@@ -38,7 +38,7 @@ Slack ──POST /api/tag/slack/webhook──▶ host Hono app
    over a structural `TagBot`, so behavior tests need no Slack, no state
    backend, no network.
 4. **Core types are platform-free.** Dispatch written against
-   `@corbits/tag-core` ports to future adapters (Telegram, Teams)
+   `corbits-tag/core` ports to future adapters (Telegram, Teams)
    unchanged. Identity fields on `TagAuthor` (`email`, `emailVerified`,
    `isRestricted`) are optional facts the platform adapter may populate;
    unresolved facts are `"unknown"` (or omitted for `email`), never a
@@ -46,7 +46,7 @@ Slack ──POST /api/tag/slack/webhook──▶ host Hono app
 5. **State backend is host-supplied.** Subscription/dedupe state needs a
    store (Redis or Postgres Chat SDK adapters); the host chooses and owns
    it — this package takes a `StateAdapter`, never a connection string.
-6. **Principal binding is a separate package.** `@corbits/tag-interchange`
+6. **Principal binding is a separate package.** `corbits-tag/interchange`
    maps a chat author to a real Interchange principal (never synthesized).
    Platform packages stay free of `@intx/db`. `createPrincipalResolver`
    reports what it found rather than deciding; `provisionPrincipal` is the

@@ -12,7 +12,7 @@ import type {
   TagDispatch,
   TagEvent,
   TagThread,
-} from "@corbits/tag-core";
+} from "../core/types.ts";
 import { postSlackMessage } from "@chat-adapter/slack/api";
 import { defaultLogger, type Logger } from "./logger.ts";
 import { mdToMrkdwn } from "./mrkdwn.ts";
