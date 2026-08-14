@@ -3,27 +3,31 @@
 ## Layout
 
 ```
-packages/
-  tag-core/src/
+src/
+  core/
     types.ts        TagEvent / TagThread / TagDispatch / TagAuthor
-    index.ts        exports
-  tag-slack/src/
+    index.ts        exports (subpath: corbits-tag/core)
+  slack/
     index.ts        mountSlackTag — Chat construction + route mount
+                     (subpath: corbits-tag/slack)
     wire.ts         wireBot — handler wiring over a structural TagBot
     slack-users.ts  cached users.info lookup → email / emailVerified /
                     isRestricted (process-lifetime cache; failures not cached)
     *.test.ts       colocated unit tests (mocked boundaries)
-  tag-interchange/src/
+  interchange/
     principal.ts    createPrincipalResolver — verified email → principal
     principal.test.ts
-    index.ts        exports
+    index.ts        exports (subpath: corbits-tag/interchange)
 ```
 
 ## Notes for maintainers
 
-- **Bun workspace**, no build step — packages ship as source
-  (`module`/`exports` point at `src/index.ts`), same posture as the Chat
-  SDK itself. `bun run typecheck` is the compile gate.
+- **Single package, no build step** — one `corbits-tag` package with
+  granular subpath exports (`corbits-tag/core`, `corbits-tag/slack`,
+  `corbits-tag/interchange`) pointing straight at `src/**/index.ts`, same
+  posture as the Chat SDK itself. `sideEffects: false` and per-subpath
+  exports keep it tree-shakeable — a bundler only pulls in the subpath a
+  host imports. `bun run typecheck` is the compile gate.
 - **`exactOptionalPropertyTypes` friction:** the Chat SDK's `SlackAdapter`
   type declares optional props without `| undefined`, so it fails strict
   assignment to `Adapter`; `mountSlackTag` casts at that one boundary with
@@ -36,7 +40,7 @@ packages/
   returns `ok`/`failed`; wire maps failure to `"unknown"` on
   `emailVerified`/`isRestricted` and omits `email`. Only settled outcomes
   (profile or definitive `user_not_found`) are cached.
-- **Principal binding is Interchange-only.** `@corbits/tag-interchange`
+- **Principal binding is Interchange-only.** `corbits-tag/interchange`
   depends on `@intx/db`; platform packages must not.
 - **The resolver reports, the host decides — mostly.** `createPrincipalResolver`
   is read-only: it returns either a principal read from the `principal` table

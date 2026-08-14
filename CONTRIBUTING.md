@@ -31,7 +31,7 @@ Both must pass before a PR is reviewed.
 - The mount contract is sacred: mount onto a host app, verify transport
   signatures, authenticate nothing else. Anything that smells like session
   auth or identity mapping belongs to the host.
-- `@corbits/tag-core` stays dependency-free and platform-free. If a type
+- `corbits-tag/core` stays dependency-free and platform-free. If a type
   mentions Slack, it doesn't belong there.
 - Every exported function carries a doc comment that states its contract
   (doc-comments-as-spec).
