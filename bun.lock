@@ -6,7 +6,7 @@
       "name": "corbits-tag",
       "dependencies": {
         "@chat-adapter/slack": "^4.34.0",
-        "@intx/db": "0.2.2",
+        "@intx/db": "0.4.0",
         "arktype": "^2.2.3",
         "chat": "^4.34.0",
         "drizzle-orm": "0.45.2",
@@ -27,11 +27,17 @@
 
     "@chat-adapter/slack": ["@chat-adapter/slack@4.37.0", "", { "dependencies": { "@chat-adapter/shared": "4.37.0", "@slack/socket-mode": "^2.0.5", "@slack/web-api": "^7.18.0", "chat": "4.37.0" } }, "sha512-4EWvfot/dl+LBEqGrNqcxpYsZ9y6UwE7l1t0kb0C3H59WnB5NXlsWyQeATM8UkjC2XmtzVWWQt/8Oc6DmKevqQ=="],
 
-    "@intx/db": ["@intx/db@0.2.2", "", { "dependencies": { "@intx/log": "0.2.2", "@intx/types": "0.2.2", "arktype": "^2.1.29", "drizzle-orm": "^0.45.1", "postgres": "^3.4.8" } }, "sha512-xqYOF8/1Ay1e/eX7GrZV0kzGgdis8SZRaqE77Ncz9hofTnwusPt83Gc1RvtfasKPici4nP6Gq9EBrrf7aRShqg=="],
+    "@intx/authz": ["@intx/authz@0.4.0", "", { "dependencies": { "@intx/types": "0.4.0" } }, "sha512-A9x4EzcECnFjhDoqj0XjaOb1GaxRyJucXOuIbY+fcPluUuMCGFvExD6DJZwjJmIYdeCvL8i96gPkncu/fAR9qA=="],
 
-    "@intx/log": ["@intx/log@0.2.2", "", { "dependencies": { "@logtape/hono": "^2.0.2", "@logtape/logtape": "^2.0.2" }, "peerDependencies": { "hono": "^4.0.0" }, "optionalPeers": ["hono"] }, "sha512-Rlkd4pvyXwlqkm6hui97VwuTytqgOmenvbdaHAFdYr1e6DHHhGu7ZodUEsLiF4993qJmWNHGlNbHEgQY1LNPrQ=="],
+    "@intx/crypto": ["@intx/crypto@0.4.0", "", { "dependencies": { "@intx/types": "0.4.0" } }, "sha512-4/qWypC90GevbV9u1i/93tn46jsXhj8wE1Pn+awg8/ECpwhHnhPLT5Uy423Arr9eGmRmF6HiMyXcEgH1Z9/Rkw=="],
 
-    "@intx/types": ["@intx/types@0.2.2", "", { "dependencies": { "arktype": "^2.1.29", "semver": "^7.7.2" } }, "sha512-9DYTXLuf6ARsHWOWnRuOaA/+5haM3yJVUhvzlps/eQTH6zjk3CMOlbgKUtBYZ164MhC5IbXCvJTLGyM1grpMqw=="],
+    "@intx/db": ["@intx/db@0.4.0", "", { "dependencies": { "@intx/authz": "0.4.0", "@intx/crypto": "0.4.0", "@intx/hub-common": "0.4.0", "@intx/log": "0.4.0", "@intx/types": "0.4.0", "arktype": "^2.1.29", "drizzle-orm": "^0.45.1", "postgres": "^3.4.8" } }, "sha512-B26emrRrpIAlRygTWs6akVA6V/rN07v4YRxj3iTxzAOJVayIHSmPuPmKxqKN/AsBgLq6H1q94RP9sq05yb4twg=="],
+
+    "@intx/hub-common": ["@intx/hub-common@0.4.0", "", { "dependencies": { "@intx/types": "0.4.0" } }, "sha512-4dcRX3kamqduf1Yil85GVsjXKnAnu6uqSYrAsl4vGpuV6R2DCy7z/PHd+DtIqk6TJrRdW7DtfkNXwSEc3dn2VQ=="],
+
+    "@intx/log": ["@intx/log@0.4.0", "", { "dependencies": { "@logtape/hono": "^2.0.2", "@logtape/logtape": "^2.0.2" }, "peerDependencies": { "hono": "^4.0.0" }, "optionalPeers": ["hono"] }, "sha512-f1IPZ/9YpEqlA0I2UZPOlRJOTDoOFEZRwZoUVuw8DpgR1WatOMm4hA0E8o6Mtz+pA0ux7gVdls4y/JZcgypsfQ=="],
+
+    "@intx/types": ["@intx/types@0.4.0", "", { "dependencies": { "arktype": "^2.1.29", "semver": "^7.7.2" } }, "sha512-nJ2fcmskMOZNMRfbHs5ueKpCANHNttoL+sZgIoFaVUF/QLpFWfVp0YV72CQAaa9bVv9j5kRSwtSOCCGSlwQ6Dw=="],
 
     "@logtape/hono": ["@logtape/hono@2.3.1", "", { "peerDependencies": { "@logtape/logtape": "^2.3.1", "hono": "^4.0.0" } }, "sha512-ryqg3HBdd79M0/wkiDIcFyB6RXBM1laauYDGWVqAVMrUu53mqRp5lDXrlQYmbIZBtyAyZK/TS2YJR22/79NzpQ=="],
 
